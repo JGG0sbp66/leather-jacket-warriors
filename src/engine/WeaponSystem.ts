@@ -1,12 +1,15 @@
 import { MAX_PROJECTILES, WORLD_HEIGHT, WORLD_WIDTH } from '../types/game.ts';
 import type {
-  Enemy, GameState, Point, Projectile, SoundName, WeaponEffect, WeaponState,
+  DungeonBarrel, Enemy, GameState, Point, Projectile, SoundName, WeaponEffect, WeaponState,
 } from '../types/game.ts';
+import { projectileObstacleHit, resolveDungeonCollision } from './DungeonSystem.ts';
 
 export interface WeaponHooks {
   nextId: () => number;
   damageEnemy: (enemy: Enemy, amount: number, canCrit?: boolean) => void;
   nearestEnemy: (at: Point, ignoredIds?: readonly number[]) => Enemy | undefined;
+  damageBarrel?: (barrel: DungeonBarrel, amount: number) => void;
+  nearestBarrel?: (at: Point) => DungeonBarrel | undefined;
   onSound: (name: SoundName) => void;
 }
 
@@ -27,20 +30,27 @@ const TAU = Math.PI * 2;
 const MAX_WEAPON_EFFECTS = 96;
 const FULL_MAP_LENGTH = Math.hypot(WORLD_WIDTH, WORLD_HEIGHT) + 120;
 
+function canAttack(state: GameState): boolean {
+  return (state.dungeon.phase === 'clearing' || state.dungeon.phase === 'boss') && (!state.bossDefeated || state.endless);
+}
+
 function addProjectile(context: AttackContext, shot: Omit<Projectile, 'id' | 'hitIds'>): boolean {
   const { state, hooks } = context;
-  if (state.projectiles.length >= MAX_PROJECTILES) return false;
+  if (!canAttack(state) || state.projectiles.length >= MAX_PROJECTILES) return false;
   state.projectiles.push({ ...shot, id: hooks.nextId(), hitIds: [] });
   return true;
 }
 
 function addEffect(state: GameState, effect: WeaponEffect): void {
-  if (state.weaponEffects.length < MAX_WEAPON_EFFECTS) state.weaponEffects.push(effect);
+  if (canAttack(state) && state.weaponEffects.length < MAX_WEAPON_EFFECTS) state.weaponEffects.push(effect);
 }
 
-function nearestLivingEnemy(context: AttackContext, at: Point): Enemy | undefined {
+function nearestLivingTarget(context: AttackContext, at: Point): Enemy | DungeonBarrel | undefined {
   const enemy = context.hooks.nearestEnemy(at);
-  return enemy && enemy.hp > 0 ? enemy : undefined;
+  if (enemy && enemy.hp > 0) return enemy;
+  const barrel = context.hooks.nearestBarrel?.(at);
+  if (!barrel || barrel.hp <= 0 || (barrel.x - at.x) ** 2 + (barrel.y - at.y) ** 2 > 420 ** 2) return undefined;
+  return projectileObstacleHit(context.state.dungeon, at, barrel, 0) === null ? barrel : undefined;
 }
 
 function segmentDistanceSquared(point: Point, start: Point, end: Point): number {
@@ -53,7 +63,7 @@ function segmentDistanceSquared(point: Point, start: Point, end: Point): number 
   return (point.x - start.x - t * dx) ** 2 + (point.y - start.y - t * dy) ** 2;
 }
 
-function intersectsSector(enemy: Enemy, origin: Point, angle: number, length: number, arc: number): boolean {
+function intersectsSector(enemy: Point & { radius: number }, origin: Point, angle: number, length: number, arc: number): boolean {
   const dx = enemy.x - origin.x;
   const dy = enemy.y - origin.y;
   const distanceSquared = dx * dx + dy * dy;
@@ -99,7 +109,7 @@ function attackGpu(context: AttackContext, weapon: WeaponState, origin: AttackOr
     return fired;
   }
 
-  const target = nearestLivingEnemy(context, origin);
+  const target = nearestLivingTarget(context, origin);
   if (!target) return false;
   const angle = Math.atan2(target.y - origin.y, target.x - origin.x);
   const growth = Math.floor((weapon.level - 1) / 2);
@@ -127,7 +137,7 @@ function attackGpu(context: AttackContext, weapon: WeaponState, origin: AttackOr
 
 function attackSpatula(context: AttackContext, weapon: WeaponState, origin: AttackOrigin): boolean {
   const { state, hooks, damageScale, sizeScale } = context;
-  const target = nearestLivingEnemy(context, origin);
+  const target = nearestLivingTarget(context, origin);
   const angle = target ? Math.atan2(target.y - origin.y, target.x - origin.x) : origin.facing;
   const length = (weapon.evolved ? 200 : 118 + weapon.level * 14) * sizeScale;
   const width = (weapon.evolved ? 40 : 24 + weapon.level * 3) * sizeScale;
@@ -138,6 +148,10 @@ function attackSpatula(context: AttackContext, weapon: WeaponState, origin: Atta
   });
 
   if (weapon.evolved) {
+    for (const barrel of state.dungeon.barrels) {
+      if (!canAttack(state)) break;
+      if (barrel.hp > 0 && intersectsSector(barrel, origin, angle, length, arc)) hooks.damageBarrel?.(barrel, 140 * damageScale);
+    }
     addProjectile(context, {
       x: origin.x,
       y: origin.y,
@@ -158,15 +172,23 @@ function attackSpatula(context: AttackContext, weapon: WeaponState, origin: Atta
   const knockback = (24 + weapon.level * 7) * sizeScale;
   for (const enemy of state.enemies) {
     if (enemy.hp <= 0 || !intersectsSector(enemy, origin, angle, length, arc)) continue;
+    if (projectileObstacleHit(state.dungeon, origin, enemy, 0) !== null) continue;
     hooks.damageEnemy(enemy, damage);
-    if (enemy.hp <= 0 || enemy.kind === 'boss' || enemy.kind === 'guard' || enemy.ringMember) continue;
+    if (enemy.hp <= 0 || enemy.kind === 'boss' || enemy.kind === 'guard' || enemy.kind === 'fan' || enemy.ringMember) continue;
     const dx = enemy.x - origin.x;
     const dy = enemy.y - origin.y;
     const distance = Math.hypot(dx, dy);
     const nx = distance > 0 ? dx / distance : Math.cos(angle);
     const ny = distance > 0 ? dy / distance : Math.sin(angle);
+    const previous = { x: enemy.x, y: enemy.y };
     enemy.x = Math.max(enemy.radius, Math.min(WORLD_WIDTH - enemy.radius, enemy.x + nx * knockback));
     enemy.y = Math.max(enemy.radius, Math.min(WORLD_HEIGHT - enemy.radius, enemy.y + ny * knockback));
+    if (enemy.kind !== 'drone' && enemy.kind !== 'vulture' && enemy.kind !== 'ghost') resolveDungeonCollision(state.dungeon, enemy, previous);
+  }
+  for (const barrel of state.dungeon.barrels) {
+    if (!canAttack(state)) break;
+    if (barrel.hp <= 0 || !intersectsSector(barrel, origin, angle, length, arc)) continue;
+    if (projectileObstacleHit(state.dungeon, origin, barrel, 0) === null) hooks.damageBarrel?.(barrel, damage);
   }
   return true;
 }
@@ -181,12 +203,20 @@ function attackCuda(context: AttackContext, weapon: WeaponState, origin: AttackO
       hooks.damageEnemy(enemy, damage);
     }
   }
+  for (const barrel of state.dungeon.barrels) {
+    if (!canAttack(state)) break;
+    if (barrel.hp > 0 && (barrel.x - origin.x) ** 2 + (barrel.y - origin.y) ** 2 <= (radius + barrel.radius) ** 2) {
+      hooks.damageBarrel?.(barrel, damage);
+    }
+  }
   return true;
 }
 
+type BeamTarget = { target: Enemy; kind: 'enemy'; along: number } | { target: DungeonBarrel; kind: 'barrel'; along: number };
+
 function attackPulse(context: AttackContext, weapon: WeaponState, origin: AttackOrigin): boolean {
   const { state, hooks, damageScale, sizeScale } = context;
-  const target = nearestLivingEnemy(context, origin);
+  const target = nearestLivingTarget(context, origin);
   if (!target) return false;
   const aim = Math.atan2(target.y - origin.y, target.x - origin.x);
   const count = weapon.evolved ? 3 : 2;
@@ -195,6 +225,7 @@ function attackPulse(context: AttackContext, weapon: WeaponState, origin: Attack
   const damage = (weapon.evolved ? 110 : 26 + (weapon.level - 1) * 12) * damageScale;
 
   for (let i = 0; i < count; i++) {
+    if (!canAttack(state)) break;
     // The ordinary pair is strictly parallel; the evolved trio fans out across the map.
     const angle = aim + (weapon.evolved ? (i - 1) * 0.22 : 0);
     const offset = weapon.evolved ? 0 : (i - 0.5) * (width + 8 * sizeScale);
@@ -202,14 +233,33 @@ function attackPulse(context: AttackContext, weapon: WeaponState, origin: Attack
       x: origin.x - Math.sin(aim) * offset,
       y: origin.y + Math.cos(aim) * offset,
     };
-    const end = { x: start.x + Math.cos(angle) * length, y: start.y + Math.sin(angle) * length };
-    const targets = state.enemies.filter((enemy) => enemy.hp > 0 && segmentDistanceSquared(enemy, start, end) <= (width / 2 + enemy.radius) ** 2)
-      .map((enemy) => ({ enemy, along: Math.max(0, (enemy.x - start.x) * Math.cos(angle) + (enemy.y - start.y) * Math.sin(angle)) }))
-      .sort((a, b) => a.along - b.along);
-    let beamLength = length;
-    for (const { enemy, along } of targets) {
-      hooks.damageEnemy(enemy, damage);
-      if (enemy.kind === 'guard') { beamLength = Math.min(length, along); break; }
+    const fullEnd = { x: start.x + Math.cos(angle) * length, y: start.y + Math.sin(angle) * length };
+    const wallHit = weapon.evolved ? null : projectileObstacleHit(state.dungeon, start, fullEnd, width / 2);
+    let beamLength = wallHit === null ? length : length * wallHit;
+    const end = { x: start.x + Math.cos(angle) * beamLength, y: start.y + Math.sin(angle) * beamLength };
+    const targets: BeamTarget[] = [];
+    for (const enemy of state.enemies) {
+      if (enemy.hp <= 0 || segmentDistanceSquared(enemy, start, end) > (width / 2 + enemy.radius) ** 2) continue;
+      if (!weapon.evolved && projectileObstacleHit(state.dungeon, start, enemy, 0) !== null) continue;
+      targets.push({ target: enemy, kind: 'enemy', along: Math.max(0, (enemy.x - start.x) * Math.cos(angle) + (enemy.y - start.y) * Math.sin(angle)) });
+    }
+    if (hooks.damageBarrel) {
+      for (const barrel of state.dungeon.barrels) {
+        if (barrel.hp <= 0 || segmentDistanceSquared(barrel, start, end) > (width / 2 + barrel.radius) ** 2) continue;
+        if (!weapon.evolved && projectileObstacleHit(state.dungeon, start, barrel, 0) !== null) continue;
+        targets.push({ target: barrel, kind: 'barrel', along: Math.max(0, (barrel.x - start.x) * Math.cos(angle) + (barrel.y - start.y) * Math.sin(angle)) });
+      }
+    }
+    targets.sort((a, b) => a.along - b.along
+      || Number(b.kind === 'enemy' && b.target.kind === 'guard') - Number(a.kind === 'enemy' && a.target.kind === 'guard'));
+    for (const hit of targets) {
+      if (!canAttack(state)) break;
+      if (hit.target.hp <= 0) continue;
+      if (hit.kind === 'barrel') hooks.damageBarrel?.(hit.target, damage);
+      else {
+        hooks.damageEnemy(hit.target, damage);
+        if (hit.target.kind === 'guard') { beamLength = Math.min(beamLength, hit.along); break; }
+      }
     }
     addEffect(state, {
       kind: 'beam', x: start.x, y: start.y, angle, length: beamLength, width, arc: 0,
@@ -232,7 +282,7 @@ function attackDuck(context: AttackContext, weapon: WeaponState, origin: AttackO
       x: origin.x + Math.cos(orbitAngle) * orbitRadius,
       y: origin.y + Math.sin(orbitAngle) * orbitRadius,
     };
-    const target = nearestLivingEnemy(context, start);
+    const target = nearestLivingTarget(context, start);
     if (!target) continue;
     const angle = Math.atan2(target.y - start.y, target.x - start.x);
     fired = addProjectile(context, {
@@ -264,6 +314,7 @@ function attackInterval(weapon: WeaponState): number {
 }
 
 function attack(context: AttackContext, weapon: WeaponState, origin: AttackOrigin): boolean {
+  if (!canAttack(context.state)) return false;
   switch (weapon.id) {
     case 'gpu': return attackGpu(context, weapon, origin);
     case 'spatula': return attackSpatula(context, weapon, origin);
@@ -287,13 +338,14 @@ export function updateWeapons(state: GameState, dt: number, hooks: WeaponHooks):
   const attackSpeed = 0.48 / state.fireInterval
     * (state.effects.freeze > 0 ? 2 : 1)
     * (state.effects.chairActive ? 2 : 1)
-    * (overwork ? 1.15 : 1);
+    * (overwork ? 1.15 : 1)
+    / (state.dungeon.playerInCoolant ? 0.55 : 1);
   const context: AttackContext = {
     state, hooks,
     damageScale: state.damage / 20 * (overwork ? 1.25 : 1),
     sizeScale: state.hexes.includes('wide') ? 1.35 : 1,
   };
-  const target = hooks.nearestEnemy(state.player);
+  const target = nearestLivingTarget(context, state.player);
   if (target && !state.player.moving) state.player.facing = Math.atan2(target.y - state.player.y, target.x - state.player.x);
   const origins: AttackOrigin[] = [{
     x: state.player.x, y: state.player.y, facing: state.player.facing,
@@ -301,16 +353,20 @@ export function updateWeapons(state: GameState, dt: number, hooks: WeaponHooks):
   }];
   const clone = state.effects.clone;
   if (clone && clone.life > 0) {
-    const cloneTarget = hooks.nearestEnemy(clone);
+    const cloneTarget = nearestLivingTarget(context, clone);
     if (cloneTarget) clone.facing = Math.atan2(cloneTarget.y - clone.y, cloneTarget.x - clone.x);
     origins.push({ x: clone.x, y: clone.y, facing: clone.facing, owner: 'clone', spectral: true });
   }
 
   let playShotSound = false;
   for (const weapon of state.weapons) {
+    if (!canAttack(state)) break;
     if (weapon.level <= 0 || !state.equipped.includes(weapon.id) || state.time + 1e-8 < weapon.nextFireTime) continue;
     let fired = false;
-    for (const origin of origins) fired = attack(context, weapon, origin) || fired;
+    for (const origin of origins) {
+      if (!canAttack(state)) break;
+      fired = attack(context, weapon, origin) || fired;
+    }
     if (!fired) continue;
     if (weapon.id !== 'cuda') playShotSound = true;
     weapon.nextFireTime = state.time + attackInterval(weapon) / attackSpeed;

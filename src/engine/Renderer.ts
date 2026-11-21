@@ -1,17 +1,24 @@
-import { SUMMON_DURATION, WORLD_HEIGHT, WORLD_WIDTH } from '../types/game.ts';
+import { BOSS_INTRO_DURATION, SUMMON_DURATION, WORLD_HEIGHT, WORLD_WIDTH } from '../types/game.ts';
 import { ALLIES } from '../data/summons.ts';
 import { WEAPONS } from '../data/weapons.ts';
-import { REVERSAL_QUOTE, STORY_NEWS } from '../data/events.ts';
-import type { CrashPillar, Crystal, Enemy, EnemyProjectile, GameState, Joystick, Player, Point, Projectile, WeaponEffect } from '../types/game.ts';
+import { REVERSAL_QUOTE } from '../data/events.ts';
+import { DungeonRenderer } from './DungeonRenderer.ts';
+import type { CrashPillar, Crystal, DungeonMap, Enemy, EnemyProjectile, GameState, Joystick, Player, Point, Projectile, WeaponEffect } from '../types/game.ts';
 
 const TAU = Math.PI * 2;
 const MONO = '"SFMono-Regular", Consolas, "Liberation Mono", monospace';
 const LIME = '#b6ed76';
 const MAX_PARTICLES = 240;
 const MAX_DAMAGE_TEXTS = 48;
+const MAX_FRAME_PIXELS = 1_600_000;
+const MAX_CANVAS_EDGE = 2048;
+const MAX_RENDER_DPR = 1.5;
+const BULL_QUOTE = '本来应该从从容容、游刃有余……';
 const ENEMY_COLORS: Record<Enemy['kind'], string> = {
   reporter: '#d6bb68', short: '#f58276', legal: '#c2ccad', security: '#f58276',
   boss: '#e4b87a', guard: '#9caabd', assassin: '#9d465d', bull: '#f9d976',
+  keyboard: '#c292ed', captain: '#a8cde1', fan: '#7dcddd', drone: '#fd9291',
+  ghost: '#99c0ff', vulture: '#e09191', quant: '#c9d7de', ironGuard: '#e5c879',
 };
 
 const READY_ENEMIES: readonly Enemy[] = [
@@ -32,6 +39,11 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function smoothstep(value: number): number {
+  const t = clamp(value, 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
 function path(ctx: CanvasRenderingContext2D, points: readonly number[], close = false): void {
   ctx.beginPath();
   ctx.moveTo(points[0], points[1]);
@@ -47,7 +59,10 @@ function circle(ctx: CanvasRenderingContext2D, x: number, y: number, radius: num
 export class Renderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly ctx: CanvasRenderingContext2D | null;
+  private readonly scene: HTMLCanvasElement;
+  private readonly sceneCtx: CanvasRenderingContext2D | null;
   private readonly arena: HTMLCanvasElement;
+  private readonly dungeonRenderer = new DungeonRenderer();
   private readonly motionQuery: MediaQueryList | null;
   private width = 1;
   private height = 1;
@@ -57,13 +72,27 @@ export class Renderer {
   private cameraY = 0;
   private viewWidth = WORLD_WIDTH;
   private viewHeight = WORLD_HEIGHT;
+  private viewOffsetX = 0;
+  private viewOffsetY = 0;
   private arenaResolution = 0;
   private arenaReady = false;
+  private arenaMap: DungeonMap = 'plaza';
   private vignette: CanvasGradient | null = null;
+  private sceneValid = false;
+  private sceneState: GameState | null = null;
+  private sceneStatus: GameState['status'] | null = null;
+  private sceneTime = -1;
+  private sceneSeed = -1;
+  private sceneFloor = 0;
+  private sceneMap: DungeonMap = 'plaza';
+  private sceneReduced = false;
+  private stillPresented = false;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d', { alpha: false });
+    this.scene = canvas.ownerDocument.createElement('canvas');
+    this.sceneCtx = this.scene.getContext('2d', { alpha: false });
     this.arena = canvas.ownerDocument.createElement('canvas');
     const view = canvas.ownerDocument.defaultView;
     this.motionQuery = view && typeof view.matchMedia === 'function'
@@ -74,18 +103,32 @@ export class Renderer {
   }
 
   resize(width: number, height: number): void {
+    const oldWidth = this.width;
+    const oldHeight = this.height;
+    const oldDpr = this.dpr;
     this.width = Number.isFinite(width) ? Math.max(1, width) : 1;
     this.height = Number.isFinite(height) ? Math.max(1, height) : 1;
-    this.dpr = clamp(this.canvas.ownerDocument.defaultView?.devicePixelRatio || 1, 1, 2);
+    // Bound both the visible canvas and the reusable color buffer on high-DPI/large displays.
+    this.dpr = Math.min(
+      clamp(this.canvas.ownerDocument.defaultView?.devicePixelRatio || 1, 1, MAX_RENDER_DPR),
+      Math.sqrt(MAX_FRAME_PIXELS / (this.width * this.height)),
+      MAX_CANVAS_EDGE / this.width, MAX_CANVAS_EDGE / this.height,
+    );
     this.scale = Math.max(this.width / WORLD_WIDTH, this.height / WORLD_HEIGHT);
     this.viewWidth = this.width / this.scale;
     this.viewHeight = this.height / this.scale;
-    const pixelWidth = Math.max(1, Math.round(this.width * this.dpr));
-    const pixelHeight = Math.max(1, Math.round(this.height * this.dpr));
+    const pixelWidth = Math.max(1, Math.floor(this.width * this.dpr));
+    const pixelHeight = Math.max(1, Math.floor(this.height * this.dpr));
+    const changed = oldWidth !== this.width || oldHeight !== this.height || oldDpr !== this.dpr
+      || this.canvas.width !== pixelWidth || this.canvas.height !== pixelHeight
+      || this.scene.width !== pixelWidth || this.scene.height !== pixelHeight;
     if (this.canvas.width !== pixelWidth) this.canvas.width = pixelWidth;
     if (this.canvas.height !== pixelHeight) this.canvas.height = pixelHeight;
+    if (this.scene.width !== pixelWidth) this.scene.width = pixelWidth;
+    if (this.scene.height !== pixelHeight) this.scene.height = pixelHeight;
+    if (changed) { this.sceneValid = false; this.stillPresented = false; }
 
-    const resolution = Math.min(1.5, Math.max(1, this.scale * this.dpr));
+    const resolution = Math.min(1.25, Math.max(0.75, this.scale * this.dpr));
     if (resolution !== this.arenaResolution) {
       this.arenaResolution = resolution;
       this.arena.width = Math.ceil(WORLD_WIDTH * resolution);
@@ -94,13 +137,13 @@ export class Renderer {
       this.arenaReady = arenaCtx !== null;
       if (arenaCtx) {
         arenaCtx.setTransform(resolution, 0, 0, resolution, 0, 0);
-        this.drawArena(arenaCtx);
+        this.drawArena(arenaCtx, this.arenaMap);
       }
     }
 
-    if (this.ctx) {
-      this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-      this.vignette = this.ctx.createRadialGradient(
+    if (this.sceneCtx && changed) {
+      this.sceneCtx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this.vignette = this.sceneCtx.createRadialGradient(
         this.width / 2, this.height / 2, Math.min(this.width, this.height) * 0.22,
         this.width / 2, this.height / 2, Math.hypot(this.width, this.height) * 0.55,
       );
@@ -110,14 +153,67 @@ export class Renderer {
   }
 
   render(state: GameState, joystick?: Joystick): void {
-    const ctx = this.ctx;
-    if (!ctx) return;
+    if (!this.ctx || !this.sceneCtx) return;
     const reduced = this.motionQuery?.matches ?? false;
-    const defeat = state.status === 'defeat';
+    const result = state.status === 'defeat' || state.status === 'victory';
+    const still = result || state.status === 'paused' || state.status === 'inventory'
+      || state.status === 'hex' || state.status === 'summonSelect';
     const finishing = state.status === 'finishing' && state.blackFlash > 0;
+    const sameScene = this.sceneValid && this.sceneState === state && this.sceneSeed === state.seed
+      && this.sceneTime === state.time && this.sceneFloor === state.dungeon.floor
+      && this.sceneMap === state.dungeon.map && this.sceneReduced === reduced;
+    if (still && sameScene && this.sceneStatus === state.status && this.stillPresented) return;
+
+    const reuseScene = sameScene && (still || finishing)
+      && (this.sceneStatus === state.status || (this.sceneStatus === 'finishing' && state.status === 'victory'));
+    if (!reuseScene) this.drawScene(state, reduced);
+    this.sceneState = state;
+    this.sceneStatus = state.status;
+    this.sceneTime = state.time;
+    this.sceneSeed = state.seed;
+    this.sceneFloor = state.dungeon.floor;
+    this.sceneMap = state.dungeon.map;
+    this.sceneReduced = reduced;
+    this.sceneValid = true;
+    this.presentScene(state, reduced, finishing, result, joystick);
+    this.stillPresented = still;
+  }
+
+  private drawScene(state: GameState, reduced: boolean): void {
+    const ctx = this.sceneCtx;
+    if (!ctx) return;
     const time = state.status === 'ready' && !reduced ? performance.now() / 1000 : state.time;
+    const bossEntry = this.bossEntryProgress(state);
+    // Give both branch elevators equal visibility on a narrow phone screen.
+    const portalView = state.dungeon.phase === 'portal';
+    this.scale = portalView ? Math.min(this.width / WORLD_WIDTH, this.height / WORLD_HEIGHT)
+      : Math.max(this.width / WORLD_WIDTH, this.height / WORLD_HEIGHT);
+    this.viewWidth = this.width / this.scale;
+    this.viewHeight = this.height / this.scale;
+    this.viewOffsetX = portalView ? Math.max(0, (this.width - WORLD_WIDTH * this.scale) / 2) : 0;
+    this.viewOffsetY = portalView ? Math.max(0, (this.height - WORLD_HEIGHT * this.scale) / 2) : 0;
+    if (state.dungeon.map !== this.arenaMap) {
+      this.arenaMap = state.dungeon.map;
+      const arenaCtx = this.arena.getContext('2d', { alpha: false });
+      this.arenaReady = arenaCtx !== null;
+      if (arenaCtx) {
+        arenaCtx.setTransform(this.arenaResolution, 0, 0, this.arenaResolution, 0, 0);
+        this.drawArena(arenaCtx, this.arenaMap);
+      }
+    }
     this.cameraX = clamp(state.player.x - this.viewWidth / 2, 0, Math.max(0, WORLD_WIDTH - this.viewWidth));
     this.cameraY = clamp(state.player.y - this.viewHeight / 2, 0, Math.max(0, WORLD_HEIGHT - this.viewHeight));
+    const landing = state.story.bossLanding;
+    if (landing && state.dungeon.phase === 'boss' && state.story.bossIntroUntil > state.story.bossIntroStart
+      && state.time >= state.story.bossIntroStart) {
+      const focus = bossEntry !== null ? smoothstep(bossEntry / 0.32)
+        : 1 - smoothstep((state.time - state.story.bossIntroUntil) / (BOSS_INTRO_DURATION * 0.16));
+      // The brief camera focus leaves real airspace above a landing near a world edge.
+      const targetX = landing.x - this.viewWidth / 2;
+      const targetY = landing.y - this.viewHeight * 0.64;
+      this.cameraX += (targetX - this.cameraX) * focus;
+      this.cameraY += (targetY - this.cameraY) * focus;
+    }
     const shake = state.status === 'playing' && !reduced ? clamp(state.shake * 20, 0, 4) : 0;
     const shakeX = Math.sin(time * 71) * shake;
     const shakeY = Math.cos(time * 83 + 1.3) * shake * 0.65;
@@ -126,28 +222,27 @@ export class Renderer {
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
-    ctx.filter = defeat ? 'grayscale(1)' : 'none';
+    ctx.filter = 'none';
     ctx.shadowBlur = 0;
     ctx.setLineDash([]);
     ctx.fillStyle = '#0b100e';
     ctx.fillRect(0, 0, this.width, this.height);
     ctx.save();
-    if (finishing) {
-      ctx.filter = reduced ? 'grayscale(1) brightness(0.65)'
-        : `grayscale(1) contrast(2.8)${state.blackFlash > 0.28 ? ' invert(1)' : ''}`;
-    } else if (!defeat && state.effects.freeze > 0) ctx.filter = 'grayscale(1) invert(1)';
-    ctx.translate(shakeX, shakeY);
+    ctx.translate(this.viewOffsetX + shakeX, this.viewOffsetY + shakeY);
     ctx.scale(this.scale, this.scale);
     ctx.translate(-this.cameraX, -this.cameraY);
     ctx.imageSmoothingEnabled = true;
     // WHY: Cache the static circuitry to keep frame cost focused on live entities.
     if (this.arenaReady) ctx.drawImage(this.arena, 0, 0, WORLD_WIDTH, WORLD_HEIGHT);
-    else this.drawArena(ctx);
+    else this.drawArena(ctx, state.dungeon.map);
+    this.dungeonRenderer.drawAmbient(ctx, state.dungeon.map, time, reduced);
 
     ctx.strokeStyle = `rgba(182, 237, 118, ${reduced ? 0.12 : 0.12 + Math.sin(time * 1.2) * 0.035})`;
     ctx.lineWidth = 1;
-    circle(ctx, WORLD_WIDTH / 2, WORLD_HEIGHT / 2, 112);
-    ctx.stroke();
+    if (state.dungeon.map === 'plaza') {
+      circle(ctx, WORLD_WIDTH / 2, WORLD_HEIGHT / 2, 112);
+      ctx.stroke();
+    }
 
     if (state.status === 'ready') {
       if (state.crystals.length === 0) {
@@ -171,16 +266,31 @@ export class Renderer {
     this.drawFields(ctx, state, reduced);
     this.drawWeaponFields(ctx, state, reduced);
     this.drawLevelPulse(ctx, state, reduced);
-    // Keep red threats legible over the time-stop inversion; darkness is applied later.
-    ctx.save(); ctx.filter = defeat ? 'grayscale(1)' : 'none';
+    ctx.save();
+    this.dungeonRenderer.drawGround(ctx, state, reduced);
     this.drawStoryGround(ctx, state, reduced);
     this.drawBossLanding(ctx, state, reduced);
     // Threats can cross the viewport even when their source is off-screen.
-    for (const enemy of state.enemies) this.drawEnemyThreat(ctx, enemy, reduced);
-    ctx.restore();
     for (const enemy of state.enemies) {
+      if (bossEntry !== null && (enemy.id === state.story.bossId || enemy.kind === 'guard')) continue;
+      this.drawEnemyThreat(ctx, enemy, reduced);
+    }
+    ctx.restore();
+    this.dungeonRenderer.drawProps(ctx, state, reduced);
+    for (const enemy of state.enemies) {
+      if (bossEntry !== null && (enemy.id === state.story.bossId || enemy.kind === 'guard')) continue;
       if (this.visible(enemy.x, enemy.y, enemy.radius * 2.5)) {
         this.drawEnemy(ctx, enemy, reduced, state.story.bossPhase === 2);
+        if (state.dungeon.coolantUntil > state.time && state.dungeon.pools.some((pool) =>
+          (enemy.x - pool.x) ** 2 + (enemy.y - pool.y) ** 2 < pool.radius ** 2)) {
+          ctx.save(); ctx.translate(enemy.x, enemy.y); ctx.strokeStyle = '#aff1ff99'; ctx.lineWidth = 1;
+          for (let i = 0; i < 3; i++) {
+            const angle = i * TAU / 3;
+            path(ctx, [Math.cos(angle) * enemy.radius * 0.7, Math.sin(angle) * enemy.radius * 0.7,
+              Math.cos(angle + 0.1) * (enemy.radius + 5), Math.sin(angle + 0.1) * (enemy.radius + 5)]); ctx.stroke();
+          }
+          ctx.restore();
+        }
       }
     }
     for (const effect of state.weaponEffects) this.drawWeaponEffect(ctx, effect, reduced);
@@ -211,7 +321,7 @@ export class Renderer {
     this.drawParticles(ctx, state, reduced);
     if (state.summonFlash > 0) this.drawSummon(ctx, state, reduced);
     this.drawDamageTexts(ctx, state, reduced);
-    ctx.save(); ctx.filter = defeat ? 'grayscale(1)' : 'none';
+    ctx.save();
     this.drawBossCuts(ctx, state, reduced);
     ctx.restore();
     ctx.restore();
@@ -220,23 +330,82 @@ export class Renderer {
       ctx.fillStyle = this.vignette;
       ctx.fillRect(0, 0, this.width, this.height);
     }
-    this.drawBlackout(ctx, state, shakeX, shakeY);
-    if (!finishing) this.drawStoryScreen(ctx, state, reduced);
-    if (state.effects.freeze > 0 || state.effects.slow > 0) {
-      ctx.strokeStyle = state.effects.freeze > 0 ? '#c4b2ff' : '#70dddc';
-      ctx.lineWidth = 3; ctx.globalAlpha = 0.55;
-      ctx.strokeRect(2, 2, this.width - 4, this.height - 4);
-      ctx.globalAlpha = 1;
+    ctx.restore();
+    ctx.filter = 'none';
+  }
+
+  private presentScene(state: GameState, reduced: boolean, finishing: boolean, result: boolean, joystick?: Joystick): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    let tint = 'none';
+    if (state.status === 'defeat') tint = 'grayscale(1)';
+    else if (finishing) tint = reduced ? 'grayscale(1) brightness(0.65)'
+      : `grayscale(1) contrast(2.4)${state.blackFlash > 0.28 ? ' invert(1)' : ''}`;
+    else if (!result && state.effects.freeze > 0) tint = 'grayscale(1) invert(1)';
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.shadowBlur = 0;
+    // Apply the color matrix to exactly one opaque image, never to individual entities/text.
+    ctx.filter = tint;
+    ctx.drawImage(this.scene, 0, 0);
+    ctx.filter = 'none';
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.setLineDash([]);
+    if (!result && !finishing) {
+      const shake = state.status === 'playing' && !reduced ? clamp(state.shake * 20, 0, 4) : 0;
+      const shakeX = Math.sin(state.time * 71) * shake;
+      const shakeY = Math.cos(state.time * 83 + 1.3) * shake * 0.65;
+      if (state.effects.freeze > 0) this.drawColoredThreats(ctx, state, reduced, shakeX, shakeY);
+      // Darkness and notices remain normal overlays, so inversion never turns a blackout white.
+      this.drawBlackout(ctx, state, shakeX, shakeY);
+      this.drawBossPhantom(ctx, state, reduced, shakeX, shakeY);
+      this.drawStoryScreen(ctx, state, reduced);
+      this.dungeonRenderer.drawTransition(ctx, state, this.width, this.height, reduced);
+      if (state.effects.freeze > 0 || state.effects.slow > 0) {
+        ctx.strokeStyle = state.effects.freeze > 0 ? '#c4b2ff' : '#70dddc';
+        ctx.lineWidth = 3; ctx.globalAlpha = 0.55;
+        ctx.strokeRect(2, 2, this.width - 4, this.height - 4);
+        ctx.globalAlpha = 1;
+      }
+      if (joystick?.active) this.drawJoystick(ctx, joystick);
     }
     if (finishing) this.drawBlackFlash(ctx, state, reduced);
-    if (defeat) {
+    if (state.status === 'defeat') {
       ctx.fillStyle = 'rgba(22, 22, 22, 0.3)';
       ctx.fillRect(0, 0, this.width, this.height);
     }
-    if (joystick?.active) this.drawJoystick(ctx, joystick);
     ctx.restore();
-    // A defeat/finishing frame must not leak its filter into a subsequent run.
     ctx.filter = 'none';
+  }
+
+  private drawColoredThreats(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean, shakeX: number, shakeY: number): void {
+    if (state.dungeon.phase !== 'clearing' && state.dungeon.phase !== 'boss') return;
+    ctx.save(); ctx.translate(this.viewOffsetX + shakeX, this.viewOffsetY + shakeY);
+    ctx.scale(this.scale, this.scale); ctx.translate(-this.cameraX, -this.cameraY);
+    for (const laser of state.dungeon.lasers) {
+      if (laser.warning <= 0 && laser.active <= 0) continue;
+      ctx.save(); ctx.translate(laser.x, laser.y); ctx.rotate(laser.angle);
+      ctx.lineCap = 'round'; ctx.lineWidth = laser.active > 0 ? laser.width : 1.5;
+      ctx.strokeStyle = laser.active > 0 ? '#ff344ca0' : '#ff7681';
+      if (laser.warning > 0) ctx.setLineDash([7, 6]);
+      path(ctx, [-laser.length / 2, 0, laser.length / 2, 0]); ctx.stroke(); ctx.restore();
+    }
+    for (const crash of state.story.crashes) {
+      if (crash.delay <= 0 || !this.visible(crash.x, crash.y, crash.radius)) continue;
+      ctx.strokeStyle = '#ff7479'; ctx.lineWidth = 1.5;
+      circle(ctx, crash.x, crash.y, crash.radius); ctx.stroke();
+    }
+    for (const enemy of state.enemies) {
+      if (enemy.spawnGrace <= 0 && enemy.chargeState !== 'approach'
+        && (enemy.kind === 'security' || (enemy.kind === 'boss' && enemy.bossType === 'truck'))) {
+        this.drawEnemyThreat(ctx, enemy, reduced);
+      }
+    }
+    this.drawBossCuts(ctx, state, reduced);
+    ctx.restore();
   }
 
   private drawWeaponDrops(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean): void {
@@ -289,7 +458,7 @@ export class Renderer {
     const count = reduced ? 6 : 20;
     for (let i = 0; i < count; i++) {
       const x = (i * 193 + 79) % WORLD_WIDTH;
-      const y = ((i * 137 + (reduced ? 0 : state.time * 42)) % (WORLD_HEIGHT + 80)) - 40;
+      const y = ((i * 137 + (reduced ? 0 : state.dungeon.floorTime * 42)) % (WORLD_HEIGHT + 80)) - 40;
       if (!this.visible(x, y, 32)) continue;
       ctx.save(); ctx.translate(x, y); ctx.rotate(-Math.PI / 2);
       ctx.globalAlpha = reduced ? 0.16 : 0.18 + (i % 3) * 0.035;
@@ -304,6 +473,7 @@ export class Renderer {
   }
 
   private drawStoryGround(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean): void {
+    if (state.dungeon.phase !== 'clearing' && state.dungeon.phase !== 'boss') return;
     const ring = state.story.ring;
     if (ring && ring.remaining > 0 && ring.radius > 0) {
       ctx.save(); ctx.translate(ring.center.x, ring.center.y);
@@ -359,30 +529,100 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawBossLanding(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean): void {
-    const remaining = state.story.bossIntroUntil - state.time;
-    if (remaining <= 0) return;
+  private bossEntryProgress(state: GameState): number | null {
+    const story = state.story;
+    if (state.dungeon.phase !== 'boss' || story.bossId === null || !story.bossLanding
+      || story.bossIntroUntil <= story.bossIntroStart || state.time < story.bossIntroStart
+      || state.time >= story.bossIntroUntil) return null;
+    return clamp((state.time - story.bossIntroStart) / (story.bossIntroUntil - story.bossIntroStart), 0, 1);
+  }
+
+  private drawBossPhantom(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean, shakeX: number, shakeY: number): void {
+    const progress = this.bossEntryProgress(state);
+    const landing = state.story.bossLanding;
+    if (progress === null || !landing) return;
     const boss = state.enemies.find((enemy) => enemy.id === state.story.bossId && enemy.kind === 'boss');
     if (!boss) return;
-    const progress = 1 - clamp(remaining, 0, 1);
-    const radius = boss.radius + 20 + (reduced ? 0 : progress * 110);
-    ctx.save(); ctx.translate(boss.x, boss.y);
-    ctx.globalAlpha = reduced ? 0.55 : 1 - progress * 0.8;
-    ctx.strokeStyle = '#ff4b55'; ctx.lineWidth = reduced ? 2 : 4 - progress * 2;
+    const descent = smoothstep((progress - 0.46) / 0.46);
+    const material = smoothstep(progress / 0.22);
+    const largeRadius = clamp(Math.min(this.width * 0.22, this.height * 0.18), 28, 120);
+    const airX = this.width / 2;
+    const airY = Math.min(this.height * 0.34, Math.max(this.height * 0.22, largeRadius * 1.28 + 22));
+    const groundX = (landing.x - this.cameraX) * this.scale + this.viewOffsetX + shakeX;
+    const groundY = (landing.y - this.cameraY) * this.scale + this.viewOffsetY + shakeY;
+    const x = airX + (groundX - airX) * descent;
+    const y = airY + (groundY - airY) * descent;
+    const radius = largeRadius + (boss.radius * this.scale - largeRadius) * descent;
+    const color = boss.bossType === 'legal' ? '#a8d4ff' : boss.bossType === 'truck' ? '#ffb6aa' : '#f0d798';
+    ctx.save();
+    if (descent > 0.02 && descent < 0.98) {
+      ctx.fillStyle = color + '0a';
+      path(ctx, [x - radius * 0.72, y, x + radius * 0.72, y,
+        groundX + boss.radius * this.scale * 0.7, groundY,
+        groundX - boss.radius * this.scale * 0.7, groundY], true); ctx.fill();
+    }
+    ctx.save(); ctx.translate(x, y); ctx.scale(radius / 16, radius / 16);
+    ctx.globalAlpha = material * (0.42 + descent * 0.58);
+    // Reuse one real sprite; transparency and short scan lines make it a hologram.
+    if (boss.bossType === 'truck') this.drawTruckBoss(ctx, boss, false, true);
+    else if (boss.bossType === 'legal') this.drawLegalBoss(ctx, false, 0);
+    else this.drawBoss(ctx, false, false, 0, state.time - state.story.bossIntroStart);
+    ctx.restore();
+    if (descent < 0.96) {
+      ctx.save();
+      ctx.globalAlpha = material * (1 - descent) * 0.48;
+      ctx.strokeStyle = color; ctx.lineWidth = 1;
+      const halfWidth = radius * 1.25;
+      const top = y - radius * 1.45;
+      const height = radius * 2.8;
+      const count = reduced ? 6 : 10;
+      const drift = reduced ? 0 : ((state.time - state.story.bossIntroStart) * 24) % (height / count);
+      for (let i = 0; i < count; i++) {
+        const lineY = top + i * height / count + drift;
+        path(ctx, [x - halfWidth, lineY, x + halfWidth, lineY]); ctx.stroke();
+      }
+      const corner = Math.min(14, radius * 0.22);
+      for (const side of [-1, 1]) {
+        path(ctx, [x + side * (halfWidth - corner), top, x + side * halfWidth, top,
+          x + side * halfWidth, top + corner]); ctx.stroke();
+      }
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  private drawBossLanding(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean): void {
+    const progress = this.bossEntryProgress(state);
+    const landing = state.story.bossLanding;
+    const sinceLanding = state.time - state.story.bossIntroUntil;
+    const afterLanding = progress === null && state.story.bossIntroUntil > state.story.bossIntroStart
+      && sinceLanding >= 0 && sinceLanding < BOSS_INTRO_DURATION * 0.16;
+    if (!landing || state.dungeon.phase !== 'boss' || (!afterLanding && (progress === null || progress < 0.72))) return;
+    const boss = state.enemies.find((enemy) => enemy.id === state.story.bossId && enemy.kind === 'boss');
+    if (!boss) return;
+    const impact = progress === null ? 1 : smoothstep((progress - 0.72) / 0.28);
+    const fade = afterLanding ? 1 - sinceLanding / (BOSS_INTRO_DURATION * 0.16) : 1;
+    const radius = boss.radius + 12 + (reduced ? 12 : impact * 66 + (1 - fade) * 28);
+    const color = boss.bossType === 'legal' ? '#a8d4ff' : boss.bossType === 'truck' ? '#ff8b8e' : '#eed18a';
+    ctx.save(); ctx.translate(landing.x, landing.y);
+    ctx.globalAlpha = (0.2 + impact * 0.6) * fade;
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
     circle(ctx, 0, 0, radius); ctx.stroke();
-    ctx.fillStyle = '#b9233320'; circle(ctx, 0, 0, boss.radius + 16); ctx.fill();
-    if (!reduced) {
-      ctx.lineWidth = 2;
-      for (let i = 0; i < 10; i++) {
-        const angle = i * TAU / 10;
-        path(ctx, [Math.cos(angle) * (radius - 8), Math.sin(angle) * (radius - 8),
-          Math.cos(angle + 0.06) * (radius + 16), Math.sin(angle + 0.06) * (radius + 16)]); ctx.stroke();
+    ctx.fillStyle = color + '14'; circle(ctx, 0, 0, boss.radius + 12); ctx.fill();
+    if (impact > 0.45) {
+      const count = reduced ? 4 : 8;
+      ctx.lineWidth = 1.5;
+      for (let i = 0; i < count; i++) {
+        const angle = i * TAU / count;
+        path(ctx, [Math.cos(angle) * (radius - 6), Math.sin(angle) * (radius - 6),
+          Math.cos(angle) * (radius + 12), Math.sin(angle) * (radius + 12)]); ctx.stroke();
       }
     }
     ctx.restore();
   }
 
   private drawBossCuts(ctx: CanvasRenderingContext2D, state: GameState, reduced: boolean): void {
+    if (state.dungeon.phase !== 'clearing' && state.dungeon.phase !== 'boss') return;
     let nextCut = Infinity;
     // Deliberately do not cull by the source: a finite segment can cross the entire view.
     for (const cut of state.story.cuts) {
@@ -419,9 +659,10 @@ export class Renderer {
   }
 
   private drawBlackout(ctx: CanvasRenderingContext2D, state: GameState, shakeX: number, shakeY: number): void {
-    if (state.story.blackoutUntil <= state.time) return;
-    const x = (state.player.x - this.cameraX) * this.scale + shakeX;
-    const y = (state.player.y - this.cameraY) * this.scale + shakeY;
+    if (state.story.blackoutUntil <= state.time
+      || (state.dungeon.phase !== 'clearing' && state.dungeon.phase !== 'boss')) return;
+    const x = (state.player.x - this.cameraX) * this.scale + this.viewOffsetX + shakeX;
+    const y = (state.player.y - this.cameraY) * this.scale + this.viewOffsetY + shakeY;
     const mask = ctx.createRadialGradient(x, y, 0, x, y, 240 * this.scale);
     mask.addColorStop(0, 'rgba(2, 3, 5, 0)');
     mask.addColorStop(0.72, 'rgba(2, 3, 5, 0)');
@@ -429,9 +670,10 @@ export class Renderer {
     mask.addColorStop(1, 'rgba(2, 3, 5, 1)');
     // source-over works on the opaque main canvas; destination-out would erase the scene.
     ctx.save(); ctx.fillStyle = mask; ctx.fillRect(0, 0, this.width, this.height);
-    ctx.translate(shakeX, shakeY); ctx.scale(this.scale, this.scale); ctx.translate(-this.cameraX, -this.cameraY);
+    ctx.translate(this.viewOffsetX + shakeX, this.viewOffsetY + shakeY);
+    ctx.scale(this.scale, this.scale); ctx.translate(-this.cameraX, -this.cameraY);
     for (const enemy of state.enemies) {
-      if (enemy.kind !== 'assassin' || enemy.hp <= 0 || enemy.radius <= 0 || !this.visible(enemy.x, enemy.y, enemy.radius)) continue;
+      if (enemy.hp <= 0 || enemy.radius <= 0 || !this.visible(enemy.x, enemy.y, enemy.radius)) continue;
       ctx.save(); ctx.translate(enemy.x, enemy.y); ctx.scale(enemy.radius / 16, enemy.radius / 16);
       ctx.globalAlpha = enemy.spawnGrace > 0 ? 0.35 : 1;
       this.drawAssassinEyes(ctx);
@@ -446,10 +688,11 @@ export class Renderer {
       const alpha = Math.min(reduced ? 0.025 : 0.18, state.story.whiteFlash * (reduced ? 0.08 : 0.65));
       ctx.fillStyle = `rgba(240, 248, 241, ${alpha})`; ctx.fillRect(0, 0, this.width, this.height);
     }
-    const alarm = state.story.event === 'alarm' || (state.story.bullUntil > 0
-      && state.time >= state.story.bullUntil && state.story.bossId === null && !state.bossDefeated);
+    const reversal = state.dungeon.map === 'temple' && state.story.event === 'shortCrash'
+      && state.dungeon.floorTime >= 30 && state.dungeon.floorTime < 35;
+    const alarm = state.story.event === 'alarm' || reversal;
     if (alarm) {
-      const opacity = reduced ? 0.22 : 0.3 + Math.sin(state.time * 2.4) * 0.045;
+      const opacity = reduced ? 0.22 : 0.3 + Math.sin(state.dungeon.floorTime * 2.4) * 0.045;
       for (const horizontal of [true, false]) {
         const extent = horizontal ? this.width : this.height;
         const edge = Math.min(0.2, 62 / extent);
@@ -462,12 +705,11 @@ export class Renderer {
       ctx.strokeStyle = '#cf3e4b'; ctx.lineWidth = 2; ctx.strokeRect(1, 1, this.width - 2, this.height - 2);
     }
     const bull = state.story.event === 'bull' && state.story.bullUntil > state.time;
-    const reversal = state.story.event === 'alarm' && state.story.news === REVERSAL_QUOTE;
     if ((bull || reversal) && state.status !== 'defeat') {
       const shake = reversal && !reduced ? clamp(state.shake * 10, 0, 3) : 0;
       const y = this.height * 0.39;
       ctx.save();
-      ctx.translate(Math.sin(state.time * 71) * shake, Math.cos(state.time * 83) * shake);
+      ctx.translate(Math.sin(state.dungeon.floorTime * 71) * shake, Math.cos(state.dungeon.floorTime * 83) * shake);
       ctx.fillStyle = reversal ? '#24090ddd' : '#132015cc';
       ctx.fillRect(16, y - 25, Math.max(1, this.width - 32), 50);
       ctx.strokeStyle = reversal ? '#c64c59' : '#a59d5b';
@@ -476,19 +718,8 @@ export class Renderer {
       ctx.font = `bold ${clamp(this.width * 0.036, 15, 27)}px sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillStyle = reversal ? '#ffb1b0' : '#e4d39b';
-      ctx.fillText(reversal ? REVERSAL_QUOTE : STORY_NEWS.bull, this.width / 2, y, Math.max(1, this.width - 48));
+      ctx.fillText(reversal ? REVERSAL_QUOTE : BULL_QUOTE, this.width / 2, y, Math.max(1, this.width - 48));
       ctx.restore();
-    }
-    const intro = state.story.bossIntroUntil - state.time;
-    if (intro > 0 && state.status !== 'defeat') {
-      const strength = clamp(intro, 0, 1);
-      ctx.globalAlpha = reduced ? 0.9 : Math.min(1, strength * 5);
-      ctx.font = `bold ${reduced ? 28 : 28 + strength * 8}px sans-serif`;
-      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-      ctx.strokeStyle = '#21090c'; ctx.lineWidth = 5; ctx.fillStyle = '#ff8b8c';
-      const maxWidth = Math.max(1, this.width - 32);
-      ctx.strokeText('资本长老会主席', this.width / 2, this.height * 0.65, maxWidth);
-      ctx.fillText('资本长老会主席', this.width / 2, this.height * 0.65, maxWidth);
     }
     ctx.restore();
   }
@@ -498,9 +729,9 @@ export class Renderer {
     // The engine freezes world time here. Only the dedicated 0.4s countdown animates this pass.
     const progress = reduced ? 0.5 : 1 - clamp(state.blackFlash / 0.4, 0, 1);
     const boss = state.enemies.find((enemy) => enemy.id === state.story.bossId);
-    const origin = boss ?? state.player;
-    const x = (origin.x - this.cameraX) * this.scale;
-    const y = (origin.y - this.cameraY) * this.scale;
+    const origin = state.story.bossDeath ?? boss ?? state.player;
+    const x = (origin.x - this.cameraX) * this.scale + this.viewOffsetX;
+    const y = (origin.y - this.cameraY) * this.scale + this.viewOffsetY;
     const reach = Math.hypot(this.width, this.height) * 0.65;
     ctx.save();
     ctx.fillStyle = reduced ? 'rgba(42, 4, 13, 0.6)' : `rgba(9, 0, 4, ${0.18 + progress * 0.58})`;
@@ -519,6 +750,17 @@ export class Renderer {
           y + Math.sin(angle) * distance + Math.cos(angle) * offset);
       }
       ctx.stroke();
+    }
+    ctx.fillStyle = '#b6ed76';
+    ctx.font = `bold 11px ${MONO}`;
+    ctx.textAlign = 'center';
+    const fragments = reduced ? 8 : 24;
+    for (let i = 0; i < fragments; i++) {
+      const angle = i * TAU / fragments;
+      const spread = 28 + progress * (60 + (i % 4) * 30);
+      ctx.globalAlpha = 0.9 - progress * 0.45;
+      ctx.fillText(i % 2 === 0 ? '01' : '10', x + Math.cos(angle) * spread,
+        y + Math.sin(angle) * spread + progress * 52);
     }
     ctx.restore();
   }
@@ -708,14 +950,15 @@ export class Renderer {
       && y + margin >= this.cameraY && y - margin <= this.cameraY + this.viewHeight;
   }
 
-  private drawArena(ctx: CanvasRenderingContext2D): void {
+  private drawArena(ctx: CanvasRenderingContext2D, map: DungeonMap = 'plaza'): void {
+    if (map !== 'plaza') { this.dungeonRenderer.drawFloor(ctx, map); return; }
     ctx.save();
     ctx.fillStyle = '#0b100e';
     ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
     const floor = ctx.createRadialGradient(600, 400, 60, 600, 400, 660);
-    floor.addColorStop(0, '#17271b');
-    floor.addColorStop(0.5, '#101c15');
-    floor.addColorStop(1, '#0c1410');
+    floor.addColorStop(0, '#192326');
+    floor.addColorStop(0.5, '#111b1d');
+    floor.addColorStop(1, '#0b1317');
     path(ctx, [48, 18, 1152, 18, 1182, 48, 1182, 752, 1152, 782, 48, 782, 18, 752, 18, 48], true);
     ctx.fillStyle = '#171f19';
     ctx.fill();
@@ -744,6 +987,13 @@ export class Renderer {
     ctx.fillStyle = '#344637';
     for (let x = 80; x <= 1120; x += 80) {
       for (let y = 80; y <= 720; y += 80) ctx.fillRect(x - 0.75, y - 0.75, 1.5, 1.5);
+    }
+
+    ctx.fillStyle = '#86bdc30b';
+    for (let i = 0; i < 10; i++) {
+      ctx.beginPath();
+      ctx.ellipse(132 + (i * 113) % 982, 138 + (i * 173) % 562, 33 + (i % 3) * 14, 7 + (i % 2) * 4, -0.16, 0, TAU);
+      ctx.fill();
     }
 
     ctx.fillStyle = '#14251a';
@@ -832,10 +1082,10 @@ export class Renderer {
     ctx.textBaseline = 'alphabetic';
     ctx.font = `10px ${MONO}`;
     const sectors = [
-      { x: 116, y: 152, code: '01 / MEMORY ARCHIVE', name: '记忆阵列' },
-      { x: 880, y: 152, code: '02 / INFERENCE BAY', name: '推演回廊' },
-      { x: 116, y: 645, code: '03 / RECOVERY NODE', name: '重构节点' },
-      { x: 880, y: 645, code: '04 / POWER TRANSIT', name: '能源通路' },
+      { x: 116, y: 152, code: '01 / MEDIA OUTPOST', name: '媒体封锁线' },
+      { x: 880, y: 152, code: '02 / SECURITY GATE', name: '外围安保' },
+      { x: 116, y: 645, code: '03 / RAIN PLAZA', name: '雨夜突围' },
+      { x: 880, y: 645, code: '04 / TOWER TRANSIT', name: '高塔入口' },
     ];
     for (const sector of sectors) {
       ctx.fillStyle = '#5b7057';
@@ -939,7 +1189,7 @@ export class Renderer {
     ctx.font = `8px ${MONO}`;
     ctx.textAlign = 'center';
     ctx.fillStyle = '#779461';
-    ctx.fillText('COMPUTE SANCTUM / 00', 0, 109);
+    ctx.fillText('TEMPLE EXTERIOR / 01', 0, 109);
     ctx.restore();
   }
 
@@ -1077,11 +1327,12 @@ export class Renderer {
       ctx.restore();
       return;
     }
-    if (enemy.kind !== 'security' || enemy.chargeState === 'approach') return;
+    if ((enemy.kind !== 'security' && !(enemy.kind === 'boss' && enemy.bossType === 'truck'))
+      || enemy.chargeState === 'approach') return;
     ctx.save(); ctx.translate(enemy.x, enemy.y); ctx.rotate(enemy.chargeAngle);
     const radius = enemy.radius;
     if (enemy.chargeState === 'aim') {
-      const progress = 1 - clamp(enemy.chargeTime / 0.9, 0, 1);
+      const progress = 1 - clamp(enemy.chargeTime / (enemy.kind === 'boss' ? 1 : 0.9), 0, 1);
       ctx.fillStyle = `rgba(244, 69, 66, ${0.045 + progress * 0.055})`;
       ctx.fillRect(0, -radius, 600, radius * 2);
       ctx.strokeStyle = '#ff6265'; ctx.lineWidth = 1.5 + progress;
@@ -1128,7 +1379,13 @@ export class Renderer {
     const outline = ENEMY_COLORS[enemy.kind];
     ctx.lineWidth = 1; ctx.lineJoin = 'round';
     if (enemy.kind === 'boss') {
-      this.drawBoss(ctx, flash, bossEnraged || enemy.hp < enemy.maxHp * 0.5, step);
+      if (enemy.bossType === 'truck') this.drawTruckBoss(ctx, enemy, flash, reduced);
+      else if (enemy.bossType === 'legal') this.drawLegalBoss(ctx, flash, step);
+      else this.drawBoss(ctx, flash, bossEnraged || enemy.hp < enemy.maxHp * 0.5, step, enemy.motionTime);
+    } else if (enemy.kind === 'keyboard' || enemy.kind === 'captain' || enemy.kind === 'fan'
+      || enemy.kind === 'drone' || enemy.kind === 'ghost' || enemy.kind === 'vulture'
+      || enemy.kind === 'quant' || enemy.kind === 'ironGuard') {
+      this.drawDungeonEnemy(ctx, enemy, flash, step, reduced);
     } else if (enemy.kind === 'guard') {
       this.drawGuard(ctx, flash, step);
     } else if (enemy.kind === 'assassin') {
@@ -1203,17 +1460,194 @@ export class Renderer {
       ctx.fillStyle = '#161712'; ctx.fillRect(-12, -21, 24, 3);
       ctx.fillStyle = hp < 0.4 ? '#f49160' : outline; ctx.fillRect(-12, -21, 24 * hp, 2);
     }
-    if (enemy.kind === 'legal' || enemy.kind === 'short') {
+    if (enemy.kind === 'legal' || enemy.kind === 'short' || enemy.kind === 'captain'
+      || enemy.kind === 'ghost' || enemy.kind === 'ironGuard' || enemy.kind === 'keyboard' || enemy.kind === 'quant') {
       ctx.fillStyle = outline; ctx.font = `7px ${MONO}`; ctx.textAlign = 'center';
-      ctx.fillText(enemy.kind === 'legal' ? 'ELITE' : 'RANGED', 0, -25);
+      const elite = enemy.kind === 'legal' || enemy.kind === 'captain' || enemy.kind === 'ghost' || enemy.kind === 'ironGuard';
+      ctx.fillText(elite ? 'ELITE' : 'RANGED', 0, -25);
     }
     ctx.restore();
   }
 
-  private drawBoss(ctx: CanvasRenderingContext2D, flash: boolean, enraged: boolean, step: number): void {
+  private drawDungeonEnemy(ctx: CanvasRenderingContext2D, enemy: Enemy, flash: boolean, step: number, reduced: boolean): void {
+    if (enemy.kind === 'fan') {
+      ctx.strokeStyle = '#8ac4d2'; ctx.fillStyle = flash ? '#eefaff' : '#18323a'; ctx.lineWidth = 1.2;
+      circle(ctx, 0, 0, 14); ctx.fill(); ctx.stroke();
+      ctx.save(); ctx.rotate(reduced ? 0.4 : enemy.motionTime * 13 + enemy.phase);
+      for (let i = 0; i < 4; i++) {
+        ctx.rotate(Math.PI / 2);
+        path(ctx, [3, -2, 7, -10, 12, -9, 12, -2, 7, 4, 3, 3], true);
+        ctx.fillStyle = flash ? '#ffffff' : '#83a8b0'; ctx.fill();
+        ctx.strokeStyle = '#b8d5d8'; ctx.lineWidth = 0.7; ctx.stroke();
+      }
+      ctx.restore();
+      circle(ctx, 0, 0, 4); ctx.fillStyle = '#121c25'; ctx.fill();
+      circle(ctx, 0, 0, 1.7); ctx.fillStyle = '#ff5c77'; ctx.fill();
+      ctx.strokeStyle = '#eeae8b'; ctx.lineWidth = 1;
+      for (let i = 0; i < 8; i++) {
+        const angle = i * TAU / 8;
+        path(ctx, [Math.cos(angle) * 14, Math.sin(angle) * 14,
+          Math.cos(angle + 0.07) * 16, Math.sin(angle + 0.07) * 16]); ctx.stroke();
+      }
+      return;
+    }
+    if (enemy.kind === 'drone') {
+      ctx.strokeStyle = '#7d8c9c'; ctx.lineWidth = 2;
+      path(ctx, [-10, -10, 10, 10]); ctx.stroke(); path(ctx, [-10, 10, 10, -10]); ctx.stroke();
+      for (const x of [-10, 10]) {
+        for (const y of [-10, 10]) {
+          circle(ctx, x, y, 4.4); ctx.fillStyle = '#18222a'; ctx.fill();
+          ctx.strokeStyle = '#94b0bb'; ctx.lineWidth = 0.7; ctx.stroke();
+          const angle = reduced ? 0.4 : enemy.motionTime * 17 + enemy.phase;
+          path(ctx, [x - Math.cos(angle) * 3.8, y - Math.sin(angle) * 3.8,
+            x + Math.cos(angle) * 3.8, y + Math.sin(angle) * 3.8]); ctx.stroke();
+        }
+      }
+      path(ctx, [-7, -6, 7, -6, 9, 2, 5, 8, -5, 8, -9, 2], true);
+      ctx.fillStyle = flash ? '#ffe1dc' : '#414852'; ctx.fill(); ctx.strokeStyle = '#c4bbc0'; ctx.stroke();
+      ctx.fillStyle = '#0a111a'; ctx.fillRect(-5, -2, 10, 6);
+      ctx.fillStyle = '#ff4766'; ctx.fillRect(-4, 0, 3, 2); ctx.fillRect(1, 0, 3, 2);
+      ctx.strokeStyle = '#f7978e'; ctx.lineWidth = 1.5; path(ctx, [0, 7, 0, 13]); ctx.stroke();
+      return;
+    }
+    if (enemy.kind === 'ghost') {
+      ctx.save(); ctx.globalAlpha *= flash ? 1 : 0.72;
+      path(ctx, [0, -15, 7, -10, 8, 1, 13, 12, 6, 9, 2, 14, -2, 9, -9, 13, -6, 4, -9, -5, -6, -12], true);
+      ctx.fillStyle = flash ? '#e1eeff' : '#294f75'; ctx.fill(); ctx.strokeStyle = '#a3ceff'; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = '#14253d'; ctx.fillRect(-5, -10, 10, 5);
+      ctx.fillStyle = '#ff587b'; ctx.fillRect(-3.5, -9, 2, 2); ctx.fillRect(1.5, -9, 2, 2);
+      ctx.font = `bold 6px ${MONO}`; ctx.fillStyle = '#b8e0ff'; ctx.textAlign = 'center'; ctx.fillText('404', 0, 0);
+      ctx.strokeStyle = '#88bded'; path(ctx, [-4, 4, 0, 7, 5, 3]); ctx.stroke();
+      if (!reduced) {
+        ctx.globalAlpha *= 0.45;
+        path(ctx, [-10, -4, -14, 0, -11, 5]); ctx.stroke(); path(ctx, [11, -5, 15, 0, 11, 6]); ctx.stroke();
+      }
+      ctx.restore(); return;
+    }
+    if (enemy.kind === 'vulture') {
+      ctx.save(); ctx.translate(0, step * 1.1);
+      for (const side of [-1, 1]) {
+        ctx.save(); ctx.scale(side, 1);
+        path(ctx, [4, -3, 10, -9 + step * 2, 21, -6 + step * 2, 15, 0, 18, 3,
+          9, 5, 5, 1], true);
+        ctx.fillStyle = flash ? '#fff0dc' : '#544353'; ctx.fill(); ctx.strokeStyle = '#d9a0aa'; ctx.lineWidth = 0.8; ctx.stroke();
+        ctx.strokeStyle = '#997285'; path(ctx, [8, -4, 14, -4, 9, 2]); ctx.stroke(); ctx.restore();
+      }
+      path(ctx, [-5, -5, 4, -6, 7, 1, 3, 9, -2, 11, -6, 4], true);
+      ctx.fillStyle = flash ? '#fff2e3' : '#262d37'; ctx.fill(); ctx.strokeStyle = '#b49c9e'; ctx.stroke();
+      ctx.fillStyle = '#fcbd61'; path(ctx, [1, -8, 6, -7, 11, -4, 5, -2, 1, -3], true); ctx.fill();
+      ctx.fillStyle = '#ff4a69'; circle(ctx, 3, -6, 1.5); ctx.fill();
+      ctx.fillStyle = '#b33e52'; ctx.fillRect(-2, 3, 4, 5);
+      ctx.strokeStyle = '#f27a86'; path(ctx, [0, 11, 0, 15]); ctx.stroke();
+      ctx.restore(); return;
+    }
+    // Human silhouettes carry different equipment, so ranged and elite threats read at a glance.
+    const captain = enemy.kind === 'captain';
+    const iron = enemy.kind === 'ironGuard';
+    const keyboard = enemy.kind === 'keyboard';
+    ctx.fillStyle = '#0a1119';
+    ctx.fillRect(-7, 7, 5, 7 + step * 0.7); ctx.fillRect(2, 7, 5, 7 - step * 0.7);
+    path(ctx, [-7, -5, 7, -5, 11, 1, 8, 9, -8, 9, -11, 1], true);
+    ctx.fillStyle = flash ? '#ffffff' : iron ? '#776637' : captain ? '#314653' : keyboard ? '#392846' : '#7b8a94';
+    ctx.fill(); ctx.strokeStyle = ENEMY_COLORS[enemy.kind]; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = iron ? '#b8a663' : '#adb7bc'; ctx.fillRect(-4, -12, 8, 7);
+    ctx.fillStyle = iron ? '#786a37' : keyboard ? '#2d1c40' : '#152331';
+    path(ctx, [-6, -13, 5, -13, 7, -9, 5, -5, -5, -5, -7, -9], true); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ff566f'; ctx.fillRect(-4, -9, 3, 2); ctx.fillRect(1, -9, 3, 2);
+    if (captain || iron) {
+      ctx.save(); ctx.rotate(enemy.chargeAngle);
+      path(ctx, [7, -10, 14, -7, 17, 0, 14, 9, 7, 11, 7, -10], true);
+      ctx.fillStyle = iron ? '#b99b4444' : '#97cee344'; ctx.fill();
+      ctx.strokeStyle = iron ? '#ffdf8f' : '#aadbea'; ctx.lineWidth = 1.3; ctx.stroke();
+      ctx.strokeStyle = iron ? '#dbc77f' : '#5e8a9c'; ctx.lineWidth = 0.7;
+      path(ctx, [11, -7, 11, 7]); ctx.stroke();
+      ctx.restore();
+      ctx.fillStyle = iron ? '#e9d28b' : '#dce8df'; ctx.fillRect(-3, 0, 6, 3);
+      if (iron) {
+        ctx.strokeStyle = '#e4b97e'; ctx.lineWidth = 2.5;
+        path(ctx, [-10, -3, -14, 10]); ctx.stroke();
+        ctx.fillStyle = '#dac28b'; ctx.fillRect(-17, -5, 7, 5);
+      }
+    } else if (keyboard) {
+      ctx.save(); ctx.translate(0, 6);
+      ctx.fillStyle = '#0c111a'; ctx.fillRect(-9, -4, 18, 10);
+      ctx.strokeStyle = '#bb83e4'; ctx.strokeRect(-9, -4, 18, 10);
+      ctx.fillStyle = '#b285dd'; ctx.font = `bold 7px ${MONO}`; ctx.textAlign = 'center'; ctx.fillText('@', 0, 3);
+      ctx.fillStyle = '#3d3353'; ctx.fillRect(-10, 6, 20, 3); ctx.restore();
+    } else {
+      path(ctx, [-4, -5, 0, 3, 4, -5], true); ctx.fillStyle = '#eef3ea'; ctx.fill();
+      ctx.fillStyle = '#405767'; ctx.fillRect(-1, -2, 2, 8);
+      ctx.fillStyle = '#17212b'; ctx.fillRect(9, -1, 8, 4);
+      ctx.fillStyle = '#df7d84'; ctx.fillRect(16, 0, 3, 2);
+      ctx.font = `5px ${MONO}`; ctx.fillStyle = '#c9efff'; ctx.textAlign = 'center'; ctx.fillText('010', 0, -7);
+    }
+  }
+
+  private drawTruckBoss(ctx: CanvasRenderingContext2D, enemy: Enemy, flash: boolean, reduced: boolean): void {
+    ctx.save(); ctx.rotate(enemy.chargeAngle);
+    ctx.fillStyle = '#070b12';
+    for (const x of [-12, 7]) {
+      ctx.fillRect(x, -13, 7, 5); ctx.fillRect(x, 8, 7, 5);
+      ctx.fillStyle = '#73798b'; ctx.fillRect(x + 1, -13, 5, 1); ctx.fillRect(x + 1, 12, 5, 1); ctx.fillStyle = '#070b12';
+    }
+    path(ctx, [-18, -9, 8, -9, 17, -6, 19, -2, 19, 6, 11, 10, -18, 10], true);
+    ctx.fillStyle = flash ? '#f9ebeb' : '#202830'; ctx.fill(); ctx.strokeStyle = '#99abb3'; ctx.lineWidth = 1; ctx.stroke();
+    ctx.fillStyle = '#090f1a'; ctx.fillRect(6, -6, 7, 12); ctx.strokeStyle = '#83bfd1'; ctx.strokeRect(6, -6, 7, 12);
+    ctx.fillStyle = '#425668'; ctx.fillRect(7, -5, 2, 10);
+    ctx.fillStyle = enemy.chargeState === 'aim' ? '#ff3c5e' : '#ffae87';
+    ctx.fillRect(16, -7, 3, 3); ctx.fillRect(16, 5, 3, 3);
+    ctx.strokeStyle = '#e66072'; ctx.lineWidth = 1.6;
+    path(ctx, [-12, -8, 3, -8]); ctx.stroke(); path(ctx, [-12, 9, 3, 9]); ctx.stroke();
+    ctx.fillStyle = '#7c263d'; ctx.fillRect(-12, -4, 15, 7);
+    ctx.font = `bold 4.7px ${MONO}`; ctx.textAlign = 'center'; ctx.fillStyle = '#ffd3d7'; ctx.fillText('LIVE', -4, 1);
+    ctx.save(); ctx.translate(-7, -2);
+    ctx.beginPath(); ctx.ellipse(0, -7, 9, 5.2, -0.3, 0, TAU);
+    ctx.fillStyle = flash ? '#ffffff' : '#c1cbd0'; ctx.fill(); ctx.strokeStyle = '#eef4e4'; ctx.lineWidth = 0.7; ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(0, -7, 7, 3.2, -0.3, 0, TAU); ctx.strokeStyle = '#738890'; ctx.stroke();
+    ctx.strokeStyle = '#b9d1d8'; ctx.lineWidth = 1.1; path(ctx, [1, -6, 5, -13]); ctx.stroke();
+    circle(ctx, 5, -13, 1); ctx.fillStyle = '#ff4467'; ctx.fill();
+    ctx.restore();
+    if (!reduced) {
+      ctx.strokeStyle = '#ffeaa555'; ctx.lineWidth = 1;
+      path(ctx, [19, -5, 31, -9]); ctx.stroke(); path(ctx, [19, 5, 31, 9]); ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  private drawLegalBoss(ctx: CanvasRenderingContext2D, flash: boolean, step: number): void {
+    ctx.save(); ctx.translate(0, step * 0.7);
+    ctx.strokeStyle = '#b8a066'; ctx.lineWidth = 1.2;
+    for (const side of [-1, 1]) {
+      for (let wing = 0; wing < 3; wing++) {
+        const x = side * (13 + wing * 3);
+        const y = -11 + wing * 9;
+        path(ctx, [side * 5, -3, x, y]); ctx.stroke();
+        ctx.save(); ctx.translate(x, y); ctx.rotate(side * (-0.5 + wing * 0.4));
+        ctx.fillStyle = flash ? '#ffffff' : '#dbcb9b'; ctx.fillRect(-4.5, -7, 9, 14);
+        ctx.strokeStyle = '#fff0c0'; ctx.lineWidth = 0.6; ctx.strokeRect(-4.5, -7, 9, 14);
+        ctx.strokeStyle = '#887943';
+        for (let line = 0; line < 3; line++) { path(ctx, [-3, -4 + line * 3, 3, -4 + line * 3]); ctx.stroke(); }
+        ctx.fillStyle = '#be6573'; ctx.fillRect(1, 4, 2, 2); ctx.restore();
+        ctx.strokeStyle = '#b8a066'; ctx.lineWidth = 1.2;
+      }
+    }
+    path(ctx, [-7, -7, 7, -7, 10, 1, 5, 13, 0, 10, -5, 13, -10, 1], true);
+    ctx.fillStyle = flash ? '#f4f5ff' : '#1a2539'; ctx.fill(); ctx.strokeStyle = '#91acd3'; ctx.lineWidth = 0.8; ctx.stroke();
+    path(ctx, [-4, -7, 0, 2, 4, -7], true); ctx.fillStyle = '#eaf1f3'; ctx.fill();
+    path(ctx, [0, -5, 1.5, -1, 1, 7, -1, 7, -1.5, -1], true); ctx.fillStyle = '#c37382'; ctx.fill();
+    path(ctx, [-5, -15, 5, -15, 6, -8, -6, -8], true); ctx.fillStyle = '#90a7bc'; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#111b2b'; ctx.fillRect(-5, -12, 10, 3);
+    ctx.fillStyle = '#fc9b9d'; ctx.fillRect(-4, -11, 3, 1); ctx.fillRect(1, -11, 3, 1);
+    ctx.strokeStyle = '#839fed'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.ellipse(0, 16, 13, 3, 0, 0, TAU); ctx.stroke();
+    ctx.font = `5px ${MONO}`; ctx.fillStyle = '#eee1b0'; ctx.textAlign = 'center'; ctx.fillText('404', 0, 6);
+    ctx.restore();
+  }
+
+  private drawBoss(ctx: CanvasRenderingContext2D, flash: boolean, enraged: boolean, step: number, motionTime = 0): void {
     // The shared enemy transform scales this mechanical suit to the Boss's radius (46).
-    const armor = flash ? '#f8e5df' : enraged ? '#872a3b' : '#283038';
-    const edge = enraged ? '#ff6473' : '#b0adb0';
+    const armor = flash ? '#f8e5df' : enraged ? '#872a3b' : '#464331';
+    const edge = enraged ? '#ff6473' : '#d8bc77';
     ctx.fillStyle = '#121720';
     ctx.fillRect(-10, 7, 7, 7 + step * 0.5); ctx.fillRect(3, 7, 7, 7 - step * 0.5);
     ctx.fillStyle = armor; ctx.strokeStyle = edge; ctx.lineWidth = 0.7;
@@ -1228,6 +1662,12 @@ export class Renderer {
       circle(ctx, 13, 1, 2.5); ctx.fillStyle = '#69717a'; ctx.fill();
       ctx.fillStyle = armor; ctx.fillRect(10, 3, 6, 7); ctx.strokeRect(10, 3, 6, 7);
       ctx.fillStyle = enraged ? '#ff5869' : '#d8ba7d'; ctx.fillRect(10, 7, 6, 1.5);
+      // The two shoulder-mounted K-line cannons distinguish the chairman from regular guards.
+      ctx.fillStyle = '#322b30'; ctx.strokeStyle = edge; ctx.lineWidth = 0.6;
+      ctx.fillRect(11, -17, 6, 9); ctx.strokeRect(11, -17, 6, 9);
+      ctx.fillStyle = '#d04b5f'; ctx.fillRect(12, -19, 4, 3);
+      ctx.fillStyle = '#ff9a95'; ctx.fillRect(13, -19, 2, 1);
+      ctx.fillStyle = armor;
       ctx.strokeStyle = '#0e151c'; path(ctx, [12, 4, 12, 6, 14, 6]); ctx.stroke();
       ctx.restore();
     }
@@ -1246,6 +1686,10 @@ export class Renderer {
     ctx.fillStyle = flash ? '#fff0eb' : '#727780'; ctx.fill(); ctx.strokeStyle = edge; ctx.stroke();
     ctx.fillStyle = '#191b26'; ctx.fillRect(-5, -17, 10, 2); ctx.fillRect(-5, -14, 10, 2);
     ctx.fillStyle = enraged ? '#ff526b' : '#efc987'; ctx.fillRect(-4, -14, 3, 1); ctx.fillRect(1, -14, 3, 1);
+    ctx.fillStyle = '#070d16'; ctx.fillRect(-5, -16, 10, 5);
+    ctx.font = `bold 3.5px ${MONO}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = enraged ? '#ff6574' : '#cfea95';
+    ctx.fillText(enraged ? 'ERR!' : String(Math.floor(motionTime * 37) % 10000).padStart(4, '0'), 0, -13.4, 9);
     ctx.strokeStyle = '#bbb5ae'; ctx.lineWidth = 0.5; path(ctx, [-3, -11, 3, -11]); ctx.stroke();
     if (enraged) {
       ctx.strokeStyle = '#ff637b'; ctx.lineWidth = 0.9;
@@ -1304,11 +1748,11 @@ export class Renderer {
     ctx.restore();
   }
 
-  private drawDocument(ctx: CanvasRenderingContext2D, radius: number): void {
+  private drawDocument(ctx: CanvasRenderingContext2D, radius: number, gold = false): void {
     // Inscribe the rotating square in the projectile's collision circle.
     const half = radius / Math.SQRT2;
-    ctx.fillStyle = '#e8ecd9'; ctx.fillRect(-half, -half, half * 2, half * 2);
-    ctx.lineWidth = Math.min(0.8, radius * 0.08); ctx.strokeStyle = '#a3b39a';
+    ctx.fillStyle = gold ? '#f4df9c' : '#e8ecd9'; ctx.fillRect(-half, -half, half * 2, half * 2);
+    ctx.lineWidth = Math.min(0.8, radius * 0.08); ctx.strokeStyle = gold ? '#fff1b6' : '#a3b39a';
     const inset = ctx.lineWidth / 2;
     ctx.strokeRect(-half + inset, -half + inset, half * 2 - inset * 2, half * 2 - inset * 2);
     ctx.fillStyle = '#7a9580'; ctx.fillRect(-half * 0.7, -half * 0.65, half * 1.4, half * 0.1);
@@ -1328,9 +1772,36 @@ export class Renderer {
 
   private drawEnemyProjectile(ctx: CanvasRenderingContext2D, shot: EnemyProjectile): void {
     if (shot.radius <= 0 || shot.life <= 0) return;
-    ctx.save(); ctx.translate(shot.x, shot.y); ctx.rotate(shot.rotation);
-    if (shot.shape === 'document') this.drawDocument(ctx, shot.radius);
-    else this.drawArrow(ctx, shot.radius, '#f35b65', '#ffd0a3');
+    ctx.save(); ctx.translate(shot.x, shot.y);
+    ctx.rotate(shot.shape === 'missile' || shot.shape === 'data' ? Math.atan2(shot.vy, shot.vx) : shot.rotation);
+    if (shot.shape === 'document') {
+      this.drawDocument(ctx, shot.radius, Boolean(shot.boomerang));
+      if (shot.boomerang?.returning) {
+        ctx.strokeStyle = '#ffd68f66'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(0, 0, shot.radius + 2, 0, Math.PI * 1.4); ctx.stroke();
+      }
+    } else if (shot.shape === 'at') {
+      circle(ctx, 0, 0, shot.radius); ctx.fillStyle = '#c177e01c'; ctx.fill();
+      ctx.fillStyle = '#dfa3f5'; ctx.font = `bold ${shot.radius * 1.7}px ${MONO}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('@', 0, 1);
+    } else if (shot.shape === 'missile') {
+      const r = shot.radius;
+      path(ctx, [-r, -r * 0.42, r * 0.45, -r * 0.42, r, 0, r * 0.45, r * 0.42, -r, r * 0.42], true);
+      ctx.fillStyle = '#b44a62'; ctx.fill(); ctx.strokeStyle = '#ffa5a9'; ctx.lineWidth = 0.8; ctx.stroke();
+      ctx.fillStyle = '#ffdfb0'; ctx.fillRect(-r * 1.35, -r * 0.2, r * 0.45, r * 0.4);
+      ctx.fillStyle = '#ff5871'; circle(ctx, r * 0.3, 0, r * 0.22); ctx.fill();
+    } else if (shot.shape === 'data') {
+      const r = shot.radius;
+      ctx.fillStyle = '#ee63767a'; ctx.fillRect(-r * 0.83, -r * 0.4, r * 1.66, r * 0.8);
+      ctx.strokeStyle = '#ffb7b5'; ctx.lineWidth = 0.7; ctx.strokeRect(-r * 0.83, -r * 0.4, r * 1.66, r * 0.8);
+      ctx.fillStyle = '#ffd4c2'; ctx.font = `bold ${r * 0.65}px ${MONO}`;
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('010', 0, 0, r * 1.45);
+    } else if (shot.shape === 'flash') {
+      ctx.fillStyle = '#f6efd8'; circle(ctx, 0, 0, shot.radius * 0.65); ctx.fill();
+      ctx.strokeStyle = '#fffef1'; ctx.lineWidth = 1;
+      circle(ctx, 0, 0, shot.radius - 0.5); ctx.stroke();
+      path(ctx, [-shot.radius * 0.4, 0, shot.radius * 0.4, 0]); ctx.stroke();
+    } else this.drawArrow(ctx, shot.radius, '#f35b65', '#ffd0a3');
     ctx.restore();
   }
 

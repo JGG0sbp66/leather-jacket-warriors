@@ -5,14 +5,15 @@ import { Renderer } from './engine/Renderer.ts';
 import { AudioEngine } from './engine/AudioEngine.ts';
 import { generatePoster } from './engine/PosterGenerator.ts';
 import { challengeLink, decodeChallenge, newSeed } from './utils/prng.ts';
-import { HEX_TIMES, MAX_BATTLE_LOG_ENTRIES, RUN_DURATION, SUMMON_DURATION } from './types/game.ts';
+import { HEX_TIMES, MAX_BATTLE_LOG_ENTRIES, SUMMON_DURATION } from './types/game.ts';
 import { IntroCutscene } from './components/IntroCutscene.tsx';
 import { AllyPortrait } from './components/AllyPortrait.tsx';
 import { HexArtwork, WeaponArtwork } from './components/CardArtwork.tsx';
 import { ALLIES } from './data/summons.ts';
 import { HEXTECH, TIER_LABELS } from './data/hextech.ts';
 import { WEAPONS } from './data/weapons.ts';
-import type { AllyId, BattleLogEntry, GameSnapshot, HexId, Joystick, RunChallenge, RunReport, WeaponId, WeaponState } from './types/game.ts';
+import { DIFFICULTIES } from './data/difficulty.ts';
+import type { AllyId, BattleLogEntry, DifficultyId, GameSnapshot, HexId, Joystick, RunChallenge, RunReport, WeaponId, WeaponState } from './types/game.ts';
 
 function Icon({ name, size = 20 }: { name: string; size?: number }) {
   const paths: Record<string, ReactNode> = {
@@ -45,6 +46,7 @@ const formatTime = (seconds: number) => `${Math.floor(seconds / 60).toString().p
 const seedLabel = (seed: number) => seed.toString(16).toUpperCase().padStart(8, '0');
 const SUMMON_OPTIONS = Object.values(ALLIES);
 const WEAPON_OPTIONS = Object.values(WEAPONS);
+const DIFFICULTY_OPTIONS = Object.values(DIFFICULTIES);
 const WEAPON_PREVIEWS: Record<WeaponId, { text: string; color: string }> = {
   gpu: { text: '瞄准近敌，飞镖连发。', color: '#b6ed76' },
   spatula: { text: '扇形重击，击退近敌。', color: '#a2e5ce' },
@@ -65,12 +67,20 @@ const HEX_SUMMARIES: Record<HexId, string> = {
   wide: '子弹与技能范围+35%。',
   network: '立获50能量，通灵充能+45%。',
 };
-const HEX_SCHEDULE = HEX_TIMES.map(formatTime).join(' / ');
+const HEX_SCHEDULE = '1F 守关击破 / 2F 守关击破 / 3F 牛市狂欢';
 const RECKLESS_WARNING = '废物的思维：已放弃所有护盾，本次关税壁垒不会生效';
-const BOSS_QUOTE = '我才是董事会MVP！股价波动你怎么不找找自己问题？！回答我！Look in my eyes！Tell me why！';
 const DEFEAT_QUOTE = '犹豫，就会被做空。老J决定连夜转行去夜市摆摊卖黄金蛋炒饭。';
 const LOG_LABELS: Record<BattleLogEntry['kind'], string> = { system: '系统', weapon: '装备', upgrade: '强化', evolution: '超武', event: '事件', summon: '通灵', hex: '海克斯', result: '结算' };
-const EVENT_LABELS: Record<GameSnapshot['event'], string> = { parking: '停车场突围', shortCrash: '华尔街做空暴击', paparazzi: '狗仔闪光灯围堵', blackout: '神殿拉闸停电', bull: '大牛市狂飙', alarm: '董事会红色警报', boss: '顶层董事会决战', endless: '无尽股东大会' };
+const EVENT_LABELS: Record<GameSnapshot['event'], string> = { parking: '外围霓虹广场', shortCrash: '华尔街恶意砸盘', paparazzi: '闪光灯包围网', blackout: '神殿拉闸停电', cryo: '液冷管道大爆裂', bull: '散户大牛市', alarm: '董事会红色警报', boss: '顶层董事会决战', truck: '直播装甲车守关战', legalBoss: '绝对协议体守关战', portal: '传送电梯已开启', endless: '无尽深渊地牢' };
+const MAP_DETAILS: Record<GameSnapshot['dungeon']['map'], { color: string; description: string }> = {
+  plaza: { color: '#b6ed76', description: '雨夜广场 · 狗仔围堵 · 直播装甲车' },
+  cryo: { color: '#7ed7f0', description: '机柜掩体 · 爆炸电池桶 · 液冷超频' },
+  darknet: { color: '#c9a3ef', description: '机柜掩体 · 黑暗暴击 · 稀有武器补给' },
+  temple: { color: '#e8cd84', description: '黄金圣殿 · 牛市反转 · 主席最终决战' },
+  singularity: { color: '#9dacf9', description: 'AI 奇点核心 · 随机地牢词缀 · 无限攀塔' },
+};
+const branchName = (branch: RunReport['dungeonBranch']) => branch === 'cryo' ? '极寒超频机房' : branch === 'darknet' ? '断电暗网走廊' : '尚未选择二层路线';
+const floorPhaseLabel = (phase: GameSnapshot['dungeon']['phase']) => ({ clearing: '突破进度', boss: '守关决战', portal: '电梯已开启', transition: '乘电梯上行' })[phase];
 const MOVEMENT_KEYS = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowLeft', 'ArrowDown', 'ArrowRight'];
 const COMMAND_KEYS = [...MOVEMENT_KEYS, 'Space', 'Enter', 'Escape', 'KeyB', 'ShiftLeft', 'ShiftRight', 'Digit1', 'Digit2', 'Digit3', 'Digit4', 'Numpad1', 'Numpad2', 'Numpad3', 'Numpad4'];
 const weaponName = (weapon: { id: WeaponId; evolved: boolean }) => weapon.evolved ? WEAPONS[weapon.id].evolution : WEAPONS[weapon.id].name;
@@ -145,8 +155,10 @@ const BattleTerminal = memo(function BattleTerminal({ logs, status, onFocus }: {
   </section>;
 });
 
-function BuildSummary({ report }: { report: Pick<RunReport, 'weapons' | 'equipped' | 'hexes' | 'summonHistory'> }) {
+function BuildSummary({ report }: { report: Pick<RunReport, 'weapons' | 'equipped' | 'hexes' | 'summonHistory' | 'difficulty' | 'dungeonBranch' | 'floorsCleared' | 'highestFloor' | 'endless'> }) {
   return <div className="result-build">
+    <p><b>挑战难度</b>{DIFFICULTIES[report.difficulty ?? 'standard'].name} · {report.endless ? '无尽挑战' : `战斗上限 ${formatTime(DIFFICULTIES[report.difficulty ?? 'standard'].timeLimit)}`}</p>
+    {(report.highestFloor !== undefined || report.dungeonBranch !== undefined) && <p className="result-route"><b>地牢路线</b>外围霓虹广场 → {branchName(report.dungeonBranch)}{report.highestFloor && report.highestFloor >= 3 ? ' → 顶层黄金圣殿' : ''}{report.endless ? ' → 无尽深渊' : ''}<span>已突破 {report.floorsCleared ?? 0} 层 · 到达 {report.highestFloor ?? 1}F{report.endless ? ' · 无尽战报' : ''}</span></p>}
     <p><b>三槽装备</b>{Array.from({ length: 3 }, (_, slot) => { const weapon = report.weapons.find((item) => item.id === report.equipped[slot]); return <span key={slot}>{slot + 1}. {weapon ? `${weaponName(weapon)} · LV.${weapon.level}${weapon.evolved ? ' · 超武' : ''}` : '空槽位'}</span>; })}</p>
     <p><b>全部已得武器</b>{report.weapons.filter((weapon) => weapon.level > 0).map((weapon) => `${weaponName(weapon)} LV.${weapon.level}${weapon.evolved ? '（超武）' : ''}`).join(' / ') || '无'}</p>
     <p><b>海克斯</b>{report.hexes.map((id) => HEXTECH.find((card) => card.id === id)!.name).join(' / ') || '未选择'}</p>
@@ -154,11 +166,31 @@ function BuildSummary({ report }: { report: Pick<RunReport, 'weapons' | 'equippe
   </div>;
 }
 
+function DungeonStrip({ dungeon }: { dungeon: GameSnapshot['dungeon'] }) {
+  const details = MAP_DETAILS[dungeon.map];
+  return <div className={`dungeon-strip floor-${dungeon.map}`} style={{ '--floor-color': details.color } as CSSProperties} aria-label={`当前第 ${dungeon.floor} 层，${dungeon.name}`}>
+    <div className="dungeon-floor-number"><b>{dungeon.floor}F</b><span>{dungeon.floor > 3 ? '深渊' : '高塔'}</span></div>
+    <div className="dungeon-floor-info"><div><strong>{dungeon.name}</strong><span>{floorPhaseLabel(dungeon.phase)} <b>{Math.floor(dungeon.progress)}%</b></span></div><Meter value={dungeon.progress} max={100} className="floor-meter" label={`${dungeon.floor}F 突破进度`}/><p>{dungeon.affixes.length > 0 ? dungeon.affixes.join(' · ') : details.description}</p></div>
+    <ol className="dungeon-steps" aria-label="高塔楼层进度">{[1, 2, 3].map((floor) => <li key={floor} className={dungeon.floorsCleared >= floor ? 'cleared' : dungeon.floor === floor ? 'current' : ''} aria-current={dungeon.floor === floor && dungeon.floorsCleared < floor ? 'step' : undefined}>{dungeon.floorsCleared >= floor ? '✓' : floor}<span>{['广场', '机房', '圣殿'][floor - 1]}</span></li>)}{dungeon.floor > 3 && <li className="current">∞<span>深渊</span></li>}</ol>
+  </div>;
+}
+
+function BossHud({ boss }: { boss: NonNullable<GameSnapshot['boss']> }) {
+  const name = `${boss.title} · ${boss.name}`;
+  const quote = boss.entering ? boss.introText : boss.quote ? boss.quoteText : null;
+  return <><div className={`boss-hud boss-${boss.type} ${boss.phase === 2 ? 'boss-enraged' : ''} ${boss.guarded ? 'boss-protected' : ''}`}>
+      <div><strong title={name}>{name}</strong><span><b>{boss.entering ? '降临中' : boss.guarded ? '协议护盾' : boss.type === 'chairman' ? `P${boss.phase}` : '守关战'}</b><small>{Math.ceil(boss.hp)} / {Math.ceil(boss.maxHp)}</small></span></div>
+      <Meter value={boss.hp} max={boss.maxHp} label={`${boss.name} 生命值`}/>
+    </div>
+    {quote && <blockquote className="boss-dialogue" role="status" aria-label={quote} title={quote}>{quote}</blockquote>}
+  </>;
+}
+
 export default function App() {
   const audio = useRef<AudioEngine | null>(null);
   const [initialLink] = useState(() => ({ hash: window.location.hash, challenge: decodeChallenge(window.location.hash) }));
   const [challenge, setChallenge] = useState<RunChallenge | null>(initialLink.challenge);
-  const [engine] = useState(() => new GameEngine(initialLink.challenge?.seed ?? newSeed(), (name) => audio.current?.play(name), initialLink.challenge?.initialWeapon ?? 'gpu'));
+  const [engine] = useState(() => new GameEngine(initialLink.challenge?.seed ?? newSeed(), (name) => audio.current?.play(name), initialLink.challenge?.initialWeapon ?? 'gpu', initialLink.challenge?.difficulty ?? 'standard'));
   const [snapshot, setSnapshot] = useState<GameSnapshot>(() => engine.snapshot());
   const [muted, setMuted] = useState(false);
   const [fps, setFps] = useState(0);
@@ -187,6 +219,7 @@ export default function App() {
   const status = snapshot.status;
   const inRun = status !== 'ready';
   const isModal = ['paused', 'inventory', 'hex', 'summonSelect', 'victory', 'defeat'].includes(status);
+  const showCombatEffects = inRun && !['finishing', 'victory', 'defeat'].includes(status);
   // Only a new round changes dialog focus; rerolling a card must preserve its button's focus.
   const modalStep = status === 'hex' ? snapshot.hexRound : 0;
   const ally = ALLIES[snapshot.ally];
@@ -198,6 +231,12 @@ export default function App() {
   const missingWeapons = WEAPON_OPTIONS.filter((definition) => !snapshot.weapons.some((weapon) => weapon.id === definition.id && weapon.level > 0));
   const report = snapshot.report;
   const starter = WEAPONS[snapshot.initialWeapon];
+  const dungeon = snapshot.dungeon;
+  const difficulty = DIFFICULTIES[snapshot.difficulty ?? 'standard'];
+  const runTimeLimit = snapshot.timeLimit ?? difficulty.timeLimit;
+  const difficultyLocked = challenge?.difficulty !== undefined;
+  const eventLabel = snapshot.event === 'parking' ? dungeon.name : snapshot.event === 'cryo' && dungeon.map === 'singularity' ? 'AI 奇点过载' : EVENT_LABELS[snapshot.event];
+  const nextHexLabel = snapshot.hexRound === 0 ? '击破 1F 守关 Boss 获得海克斯' : snapshot.hexRound === 1 ? '击破 2F 守关 Boss 获得海克斯' : snapshot.hexRound === 2 ? '3F 牛市狂欢结束时选择海克斯' : '构筑成型 · 向高塔之巅突围';
 
   const sync = useCallback(() => setSnapshot(engine.snapshot()), [engine]);
   const clearInput = useCallback(() => {
@@ -228,6 +267,7 @@ export default function App() {
     sync();
   }, [engine, clearInput, resetReportUi, sync]);
   const requestSummon = useCallback(() => {
+    if (['portal', 'transition'].includes(engine.state.dungeon.phase)) return;
     audio.current?.unlock();
     if (!engine.requestSummon()) return;
     clearInput(); setSelectedAlly(null); sync();
@@ -251,19 +291,20 @@ export default function App() {
   function cancelSummon() { engine.cancelSummon(); setSelectedAlly(null); clearInput(); sync(); }
   function chooseHex(id: HexId) { engine.chooseHex(id); clearInput(); sync(); }
   function rerollHex(slot: number) { if (!snapshot.hexRerolls[slot]) { engine.rerollHex(slot); sync(); } }
+  function selectDifficulty(id: DifficultyId) { if (!difficultyLocked && engine.selectDifficulty(id)) sync(); }
   function lobby(hash = window.location.hash) {
     const next = decodeChallenge(hash);
     setChallenge(next);
     loadedHash.current = hash; setPendingHash(null);
     setLinkNotice(hash.startsWith('#run=') && !next ? '挑战链接无效或版本不受支持，已为你准备正常新局。' : '');
-    engine.returnToLobby(next?.seed ?? newSeed(), next?.initialWeapon ?? 'gpu');
+    engine.returnToLobby(next?.seed ?? newSeed(), next?.initialWeapon ?? 'gpu', next ? next.difficulty ?? 'standard' : engine.state.difficulty);
     setSelectedAlly(null); setSelectedReserve(null); resetReportUi();
     introVisible.current = false; setShowIntro(false); clearInput(); sync();
   }
   function exitChallenge() {
     window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
     lobby('');
-    setLinkNotice('已退出挑战：新种子，五种起手均可自由选择。');
+    setLinkNotice('已退出挑战：新种子，起手武器与难度均可自由选择。');
   }
   function navigateSummons(event: ReactKeyboardEvent<HTMLDialogElement>) {
     if (status !== 'summonSelect' || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.code)) return;
@@ -277,7 +318,7 @@ export default function App() {
     setSelectedAlly(next.id);
     dialog.current?.querySelector<HTMLButtonElement>(`[data-ally="${next.id}"]`)?.focus({ preventScroll: false });
   }
-  function slow() { audio.current?.unlock(); engine.activateSlow(); sync(); }
+  function slow() { if (['portal', 'transition'].includes(engine.state.dungeon.phase)) return; audio.current?.unlock(); if (engine.activateSlow()) sync(); }
   function pause() { engine.pause(); clearInput(); sync(); }
   function resume() { engine.resume(); clearInput(); sync(); }
   function enterEndless() { if (engine.enterEndless()) { resetReportUi(); clearInput(); sync(); } }
@@ -343,6 +384,13 @@ export default function App() {
     let lastFps = last;
     let frames = 0;
     let lastStatus = engine.state.status;
+    let lastFloor = engine.state.dungeon.floor;
+    let lastDungeonPhase = engine.state.dungeon.phase;
+    const hudRevision = () => {
+      const s = engine.state;
+      return `${s.difficulty}:${s.time}:${s.dungeon.transition}:${s.logs.at(-1)?.id ?? 0}:${s.level}:${s.xp}:${s.player.hp}:${s.energy}`;
+    };
+    let lastHudRevision = hudRevision();
     const resize = new ResizeObserver(([entry]) => renderer.resize(entry.contentRect.width, entry.contentRect.height));
     resize.observe(canvas.current);
     const keydown = (event: KeyboardEvent) => {
@@ -384,7 +432,7 @@ export default function App() {
         return;
       }
       if (event.code === 'Space') { event.preventDefault(); event.stopPropagation(); requestSummon(); return; }
-      if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') { event.preventDefault(); sound.unlock(); engine.activateSlow(); sync(); return; }
+      if (event.code === 'ShiftLeft' || event.code === 'ShiftRight') { event.preventDefault(); if (!['portal', 'transition'].includes(engine.state.dungeon.phase)) { sound.unlock(); if (engine.activateSlow()) sync(); } return; }
       if (MOVEMENT_KEYS.includes(event.code)) { event.preventDefault(); keys.current.add(event.code); }
     };
     const keyup = (event: KeyboardEvent) => {
@@ -400,7 +448,7 @@ export default function App() {
     const animate = (now: number) => {
       const dt = Math.min((now - last) / 1000, 0.05);
       last = now;
-      if (engine.state.status === 'playing') {
+      if (engine.state.status === 'playing' && engine.state.dungeon.phase !== 'transition') {
         if (joystick.current.active) {
           const j = joystick.current;
           engine.setMovement((j.current.x - j.origin.x) / 46, (j.current.y - j.origin.y) / 46);
@@ -410,13 +458,24 @@ export default function App() {
         }
       } else engine.setMovement(0, 0);
       engine.advance(dt);
-      if (engine.state.status !== lastStatus) {
-        clearInput(); lastStatus = engine.state.status;
-        setSnapshot(engine.snapshot()); lastHud = now;
-      } else if (now - lastHud >= 100) { setSnapshot(engine.snapshot()); lastHud = now; }
+      const nextDungeonPhase = engine.state.dungeon.phase;
+      const travelChanged = nextDungeonPhase !== lastDungeonPhase && (nextDungeonPhase === 'portal' || nextDungeonPhase === 'transition' || lastDungeonPhase === 'transition');
+      // Modal controls sync explicitly; frozen screens need no periodic snapshot allocations.
+      if (engine.state.status !== lastStatus || engine.state.dungeon.floor !== lastFloor || travelChanged) {
+        clearInput(); lastStatus = engine.state.status; lastFloor = engine.state.dungeon.floor;
+        setSnapshot(engine.snapshot()); lastHud = now; lastHudRevision = hudRevision();
+        if (engine.state.status !== 'playing') setFps(0);
+      } else if (engine.state.status === 'playing' && now - lastHud >= 100) {
+        const revision = hudRevision();
+        if (revision !== lastHudRevision) { setSnapshot(engine.snapshot()); lastHudRevision = revision; }
+        lastHud = now;
+      }
+      lastDungeonPhase = nextDungeonPhase;
       renderer.render(engine.state, joystick.current);
-      frames++;
-      if (now - lastFps >= 1000) { setFps(Math.round(frames * 1000 / (now - lastFps))); frames = 0; lastFps = now; }
+      if (engine.state.status === 'playing') {
+        frames++;
+        if (now - lastFps >= 1000) { setFps(Math.round(frames * 1000 / (now - lastFps))); frames = 0; lastFps = now; }
+      } else { frames = 0; lastFps = now; }
       frame = requestAnimationFrame(animate);
     };
     frame = requestAnimationFrame(animate);
@@ -445,7 +504,7 @@ export default function App() {
   }, [isModal, status, modalStep]);
 
   function pointerDown(event: PointerEvent<HTMLCanvasElement>) {
-    if (engine.state.status !== 'playing' || activePointer.current !== null || event.button !== 0) return;
+    if (engine.state.status !== 'playing' || engine.state.dungeon.phase === 'transition' || activePointer.current !== null || event.button !== 0) return;
     audio.current?.unlock(); event.currentTarget.setPointerCapture(event.pointerId); activePointer.current = event.pointerId;
     const rect = event.currentTarget.getBoundingClientRect();
     const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -466,26 +525,42 @@ export default function App() {
   }
 
   const briefing = status === 'summonSelect' ? '战场已暂停，先选择盟友，再确认召唤；取消不会消耗能量。' : engine.state.summonFlash > 0 ? `连一刻都没有为董事会的困局哀悼，立刻赶到战场的是——【${ally.name}】！` : snapshot.news;
-  const timeLabel = snapshot.endless ? '无尽已战斗' : '决战剩余时间';
-  const timeDisplay = formatTime(snapshot.endless ? snapshot.time : Math.max(0, Math.ceil(RUN_DURATION - snapshot.time)));
-  const connectionLabel = { ready: '起手选择 · 连接已就绪', playing: snapshot.endless ? '无尽股东大会' : '接入进行中', paused: '连接已暂停', inventory: '武器匣 · 战场暂停', hex: '海克斯 · 战场暂停', summonSelect: '通灵选择 · 战场暂停', finishing: '黑闪 · 董事会正在崩解', victory: '神殿权限已收复', defeat: '行动已结束' }[status];
+  const timeLabel = snapshot.endless ? '无尽累计战斗' : '地牢战斗时间';
+  const timeDisplay = formatTime(snapshot.time);
+  const connectionLabel = { ready: '起手选择 · 高塔已就绪', playing: snapshot.endless ? `${dungeon.floor}F 无尽深渊` : `${dungeon.floor}F 地牢突围中`, paused: '连接已暂停', inventory: '武器匣 · 战场暂停', hex: '海克斯 · 战场暂停', summonSelect: '通灵选择 · 战场暂停', finishing: '黑闪 · 董事会正在崩解', victory: '神殿权限已收复', defeat: '行动已结束' }[status];
 
   return <div className="app-shell">
-    <header className="topbar"><a className="brand" href="./" aria-label="重返算力神殿首页"><span className="brand-mark"><Icon name="chip" size={25}/></span><span><strong>重返算力神殿</strong><small>RETURN TO THE COMPUTE TEMPLE</small></span></a><div className="topbar-right"><span className="build-tag"><i/> PHASE 03 <span>/</span> 神殿决战</span><span className="offline-label">纯本地运行 <Icon name="shield" size={14}/></span></div></header>
+    <header className="topbar"><a className="brand" href="./" aria-label="重返算力神殿首页"><span className="brand-mark"><Icon name="chip" size={25}/></span><span><strong>重返算力神殿</strong><small>RETURN TO THE COMPUTE TEMPLE</small></span></a><div className="topbar-right"><span className="build-tag"><i/> VERSION 02 <span>/</span> 高塔地牢</span><span className="offline-label">纯本地运行 <Icon name="shield" size={14}/></span></div></header>
     <main className="workspace">
-      <div className="mission-heading"><div><div className="eyebrow">OPERATION 001 <span> // </span> RECLAIM ACCESS</div><h1>皮衣无双 <span>{EVENT_LABELS[snapshot.event]}</span></h1></div><div className="sector-label"><span className="status-dot"/> 神殿外环 <span className="mono">SECTOR — 07</span></div></div>
+      <div className="mission-heading"><div><div className="eyebrow">OPERATION 002 <span> // </span> TOWER BREAKOUT</div><h1>皮衣无双 <span>{eventLabel}</span></h1></div><div className="sector-label"><span className="status-dot"/> {dungeon.name} <span className="mono">FLOOR — {String(dungeon.floor).padStart(2, '0')}</span></div></div>
       {(linkNotice || pendingHash !== null) && <div className="link-notice" role="status">{pendingHash !== null ? <><span>检测到新的链接。本局未被重置；返回起手时载入。</span>{!inRun && <button type="button" className="secondary-button" onClick={() => lobby()}>载入当前链接</button>}</> : linkNotice}</div>}
       <div className={`game-layout ${inRun ? '' : 'is-lobby'}`}>
         <section className={`arena-panel ${inRun ? 'is-active' : ''}`} aria-label="游戏战场">
           <div className="arena-toolbar"><span><span className="signal-icon">▥</span> {connectionLabel}</span><div className="arena-actions"><span className="fps mono">{fps || '—'} FPS</span><button className="icon-button" onClick={toggleAudio} aria-label={muted ? '开启音效' : '关闭音效'} title={muted ? '开启音效' : '关闭音效'}><Icon name={muted ? 'mute' : 'sound'} size={18}/></button><button className="icon-button" onClick={pause} disabled={status !== 'playing'} aria-label="暂停游戏" title="暂停 · Esc"><Icon name="pause" size={17}/></button></div></div>
-          {inRun && snapshot.boss && <div className={`boss-hud ${snapshot.boss.phase === 2 ? 'boss-enraged' : ''}`}><div><strong>资本长老会主席</strong><span>{snapshot.boss.entering ? '降临中' : `PHASE 0${snapshot.boss.phase}`} · {Math.ceil(snapshot.boss.hp)} / {snapshot.boss.maxHp}</span></div><Meter value={snapshot.boss.hp} max={snapshot.boss.maxHp} label="资本长老会主席生命值"/>{snapshot.boss.quote && <blockquote role="status">“{BOSS_QUOTE}”</blockquote>}</div>}
-          <div className={`arena-stage ${hasChrono ? 'has-chrono' : ''}`}>
+          {inRun && <DungeonStrip dungeon={dungeon}/>}
+          <div className={`arena-stage phase-${dungeon.phase} ${snapshot.boss ? 'has-boss' : ''} ${snapshot.boss && (snapshot.boss.entering || snapshot.boss.quote) ? 'has-boss-dialogue' : ''} ${hasChrono ? 'has-chrono' : ''}`}>
             <canvas ref={canvas} className="game-canvas" tabIndex={0} aria-label="WASD、方向键或战场拖动移动；自动攻击；1、2、3切培养焦点；B或Tab打开武器匣；满能量空格选盟友" onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} onLostPointerCapture={pointerUp}/>
-            {inRun && <div className="game-hud"><div className="health-group"><div className="health-caption"><span><Icon name="heart" size={13}/> 生命值</span><b className="mono" data-testid="health">{snapshot.hp}<span>/{snapshot.maxHp}</span></b></div><Meter value={snapshot.hp} max={snapshot.maxHp} className={snapshot.hp < snapshot.maxHp * .3 ? 'danger' : ''} label="生命值"/><div className="level-row"><b>LV.{snapshot.level.toString().padStart(2, '0')}</b><Meter value={snapshot.xp} max={snapshot.xpNeeded} className="xp-meter" label="自动强化经验"/></div><p className="xp-caption">XP 自动强化{snapshot.priorityWeapon ? `：${WEAPONS[snapshot.priorityWeapon].name}` : ' · 装备已完成培养'}</p></div><div className="time-group"><small>{timeLabel}</small><strong className="mono" data-testid="time">{timeDisplay}</strong><span><Icon name="crosshair" size={12}/> {snapshot.kills} 已击杀</span></div></div>}
+            {inRun && <div className="game-hud"><div className="health-group"><div className="health-caption"><span><Icon name="heart" size={13}/> 生命值</span><b className="mono" data-testid="health">{snapshot.hp}<span>/{snapshot.maxHp}</span></b></div><Meter value={snapshot.hp} max={snapshot.maxHp} className={snapshot.hp < snapshot.maxHp * .3 ? 'danger' : ''} label="生命值"/><div className="level-row"><b>LV.{snapshot.level.toString().padStart(2, '0')}</b><Meter value={snapshot.xp} max={snapshot.xpNeeded} className="xp-meter" label="自动强化经验"/></div><p className="xp-caption">XP 自动强化{snapshot.priorityWeapon ? `：${WEAPONS[snapshot.priorityWeapon].name}` : ' · 装备已完成培养'}</p></div><div className="time-group"><small>{timeLabel}</small><strong className="mono" data-testid="time">{timeDisplay}</strong><span><Icon name="crosshair" size={12}/> {snapshot.kills} 已击杀</span><span className="hud-difficulty" title={snapshot.endless ? `${difficulty.name} · 无尽挑战` : `${difficulty.name}难度 · 战斗上限 ${formatTime(runTimeLimit)}`}>{difficulty.name}{!snapshot.endless && ` · ${formatTime(runTimeLimit)}`}</span></div></div>}
+            {inRun && snapshot.boss && <BossHud boss={snapshot.boss}/>}
+            {inRun && dungeon.phase === 'portal' && dungeon.portalChoices.length > 0 && <div className="portal-guide" role="status"><span className="portal-guide-title">{dungeon.portalChoices.length > 1 ? '守关已突破 · 走入地面传送门，选择二层路线' : dungeon.floor === 2 && !snapshot.endless ? '守关已突破 · 走入金色电梯，直冲顶层' : '守关已突破 · 走入传送电梯，继续向上'}</span><div className={`portal-route-list ${dungeon.portalChoices.length === 1 ? 'single-route' : ''}`}>{dungeon.portalChoices.map((portal, index) => <div className="portal-route" key={portal.destination} style={{ '--portal-color': portal.color } as CSSProperties}><small>{dungeon.portalChoices.length > 1 ? index === 0 ? '← 左门' : '右门 →' : '↑ 直达电梯'}</small><strong>{portal.label}</strong><span>{portal.description}</span>{challenge?.dungeonBranch === portal.destination && <em>分享者选择的路线</em>}</div>)}</div><p>移动进入光圈即可上行；选门与电梯期间不计战斗时间。</p></div>}
+            {inRun && dungeon.transition > 0 && <div className="floor-transition" role="status"><span className="floor-transition-icon"><Icon name="arrow" size={29}/></span><small>传送电梯 · 上行中</small><strong>{dungeon.floor}F · {dungeon.name}</strong><p>{MAP_DETAILS[dungeon.map].description}</p>{dungeon.affixes.length > 0 && <span className="transition-affixes">{dungeon.affixes.join(' · ')}</span>}</div>}
             {!inRun && <div className="start-screen arsenal-screen">
               <div className="arsenal-heading"><div><span className="start-code">起手武器 <span>/</span> 皮衣老J</span><h2>选一把，<span>杀回神殿。</span></h2></div><button type="button" className="intro-replay" onClick={() => { clearInput(); introVisible.current = true; setShowIntro(true); }}>重播开场 <Icon name="replay" size={14}/></button></div>
-              <p className="arsenal-description">选 1 把起手，最多 3 把出战。<span className="arsenal-swipe-hint">左右滑动查看五把武器</span></p>
-              {challenge && <section className="challenge-panel" aria-label="本地挑战目标"><div><strong>同款起手已锁定 · {WEAPONS[challenge.initialWeapon].name}</strong><span className="mono">SEED {seedLabel(challenge.seed)}</span></div><p>未验证目标：{challenge.target.kills} 击杀 / LV.{challenge.target.level} / {formatTime(challenge.target.time)} · 非服务器排名</p><details><summary>查看目标构筑与复现说明</summary><BuildSummary report={challenge.target}/><p>同 seed、同决策可复现候选与掉落，不是自动回放。目标由分享者提供，未经服务器验证。</p></details><button type="button" className="text-button" onClick={exitChallenge}>退出挑战，清除链接并自由选起手</button></section>}
+              <p className="arsenal-description">选 1 把起手，最多 3 把出战。清怪、破 Boss、选门，三层直冲塔顶。<span className="arsenal-swipe-hint">左右滑动查看五把武器</span></p>
+              {challenge && <section className="challenge-panel" aria-label="本地挑战目标">
+                <div><strong>同款起手已锁定 · {WEAPONS[challenge.initialWeapon].name}</strong><span className="mono">SEED {seedLabel(challenge.seed)}</span></div>
+                <p>未验证目标：{challenge.target.kills} 击杀 / LV.{challenge.target.level} / {formatTime(challenge.target.time)} · 非服务器排名</p>
+                <p>{difficultyLocked ? `同款难度已锁定：${DIFFICULTIES[challenge.difficulty!].name}` : '旧版挑战默认标准难度，可在下方自由调整。'}</p>
+                {challenge.dungeonBranch && <p className={`challenge-route route-${challenge.dungeonBranch}`}>分享者路线：{branchName(challenge.dungeonBranch)}。1F 破关后走入对应门，即可挑战同款机房；也可自由改选另一条路线。</p>}
+                {challenge.version === 2 && <p>已兼容载入旧版种子与起手，本局使用新的三层地牢规则。</p>}
+                <details><summary>查看目标构筑与复现说明</summary><BuildSummary report={{ ...challenge.target, difficulty: challenge.difficulty, dungeonBranch: challenge.dungeonBranch }}/><p>同种子、同难度、同路线、同决策可复现地图、候选与掉落，不包含自动回放。目标由分享者提供，未经服务器验证。</p></details>
+                <button type="button" className="text-button" onClick={exitChallenge}>退出挑战，自由选择起手与难度</button>
+              </section>}
+              <section className="difficulty-selector" aria-label="选择游戏难度">
+                <div className="difficulty-heading"><strong>选择难度</strong><span>{difficultyLocked ? '挑战难度已锁定' : '开局前可更换 · 再来一局保留'}</span></div>
+                <div className="difficulty-options" role="group" aria-label="四档难度">{DIFFICULTY_OPTIONS.map((option) => <button type="button" key={option.id} className={`difficulty-choice ${difficulty.id === option.id ? 'selected' : ''}`} style={{ '--difficulty-color': option.color } as CSSProperties} aria-pressed={difficulty.id === option.id} aria-label={`${option.name}：${option.description}，战斗上限 ${formatTime(option.timeLimit)}`} disabled={difficultyLocked} onClick={() => selectDifficulty(option.id)}><strong>{option.name}</strong><span>{option.tagline}</span><small>战斗上限 {formatTime(option.timeLimit)}</small>{difficulty.id === option.id && <i>已选</i>}</button>)}</div>
+                <p className="difficulty-description">{difficulty.description} 选卡、选门和切换地图不计时。</p>
+              </section>
               <div className="starter-options" role="group" aria-label="五种起手武器">{WEAPON_OPTIONS.map((weapon, index) => <button type="button" className={`starter-card ${snapshot.initialWeapon === weapon.id ? 'selected' : ''}`} key={weapon.id} style={{ '--card-accent': WEAPON_PREVIEWS[weapon.id].color } as CSSProperties} aria-label={`选择${weapon.name}：${WEAPON_PREVIEWS[weapon.id].text} 超武：${weapon.evolution}`} aria-pressed={snapshot.initialWeapon === weapon.id} disabled={!!challenge && challenge.initialWeapon !== weapon.id} onClick={() => { if (!challenge && engine.selectInitialWeapon(weapon.id)) sync(); }}>
                 <span className="starter-art"><WeaponArtwork id={weapon.id}/><span className="starter-number" aria-hidden="true">0{index + 1}</span>{snapshot.initialWeapon === weapon.id && <span className="starter-selected-mark" aria-hidden="true"><Icon name="star" size={14}/></span>}</span>
                 <span className="starter-copy"><strong className="starter-name">{weapon.name}</strong><span className="starter-description">{WEAPON_PREVIEWS[weapon.id].text}</span><span className="evolution-name"><small>超武</small>{weapon.evolution}</span><span className="starter-choice">{snapshot.initialWeapon === weapon.id ? '已选中' : challenge ? '挑战锁定' : '选择此武器'}<Icon name="arrow" size={16}/></span></span>
@@ -496,13 +571,13 @@ export default function App() {
             {status === 'playing' && <>
               <div className="effect-tags">{snapshot.activeEffects.map((effect, index) => <span key={index}>{effect}</span>)}</div>
               <div className="battle-notices" aria-hidden="true">{snapshot.logs.filter((entry) => (entry.kind === 'evolution' || entry.kind === 'event') && snapshot.time - entry.time < 2.8).slice(-2).map((entry) => <p key={entry.id} className={`battle-notice notice-${entry.kind}`}>{entry.kind === 'evolution' && <Icon name="star" size={15}/>}<span>{entry.text}</span></p>)}</div>
-              <div className="field-caption"><span className="reticle-corner"/> {snapshot.eventRemaining > 0 ? `${EVENT_LABELS[snapshot.event]} · ${Math.ceil(snapshot.eventRemaining)}s` : snapshot.endless ? '无尽模式 · 无时间上限' : snapshot.hexRound < HEX_TIMES.length ? `下次海克斯 ${Math.max(0, Math.ceil(HEX_TIMES[snapshot.hexRound] - snapshot.time))} 秒` : '构筑成型 · 击败董事会主席'}</div>
-              {hasChrono && <button className="dash-button" onClick={slow} disabled={snapshot.dashCooldown > 0 || isSlowed} aria-label="开启斯安威斯坦"><Icon name="clock" size={17}/><span>{isSlowed ? '子弹时间' : snapshot.dashCooldown > 0 ? `${Math.ceil(snapshot.dashCooldown)} 秒冷却` : '斯安威斯坦'}<small>SHIFT / 点击</small></span></button>}
-              <button className={`summon-button ${snapshot.energy >= 100 ? 'charged' : ''}`} disabled={snapshot.energy < 100} onClick={requestSummon} style={{ '--charge': `${snapshot.energy}%` } as CSSProperties} aria-label={snapshot.energy >= 100 ? '硅谷通灵术：暂停并选择盟友' : `通灵充能 ${Math.floor(snapshot.energy)}%`}><Icon name="bolt" size={26}/><span><strong>{snapshot.energy >= 100 ? '选择召唤盟友' : '通灵充能'}</strong><small>{snapshot.energy >= 100 ? 'SPACE / 点击选择' : `${Math.floor(snapshot.energy)}%`}</small></span><span className="summon-key">␣</span></button>
+              <div className="field-caption"><span className="reticle-corner"/> {dungeon.phase === 'portal' ? '走入传送光圈 · 继续上行' : dungeon.phase === 'transition' ? '正在切换地牢地图' : snapshot.eventRemaining > 0 ? `${eventLabel} · ${Math.ceil(snapshot.eventRemaining)}s` : snapshot.endless ? `${dungeon.floor}F 无尽地牢 · 击破守关继续攀塔` : nextHexLabel}</div>
+              {hasChrono && <button className="dash-button" onClick={slow} disabled={!!snapshot.boss?.entering || snapshot.dashCooldown > 0 || isSlowed} aria-label={snapshot.boss?.entering ? '首领降临中，落地后可开启斯安威斯坦' : '开启斯安威斯坦'}><Icon name="clock" size={17}/><span>{snapshot.boss?.entering ? '落地后可闪避' : isSlowed ? '子弹时间' : snapshot.dashCooldown > 0 ? `${Math.ceil(snapshot.dashCooldown)} 秒冷却` : '斯安威斯坦'}<small>SHIFT / 点击</small></span></button>}
+              <button className={`summon-button ${snapshot.energy >= 100 ? 'charged' : ''}`} disabled={snapshot.energy < 100 || !!snapshot.boss?.entering} onClick={requestSummon} style={{ '--charge': `${snapshot.energy}%` } as CSSProperties} aria-label={snapshot.boss?.entering ? '首领降临中，落地后可选择盟友' : snapshot.energy >= 100 ? '硅谷通灵术：暂停并选择盟友' : `通灵充能 ${Math.floor(snapshot.energy)}%`}><Icon name="bolt" size={26}/><span><strong>{snapshot.boss?.entering ? '首领降临中' : snapshot.energy >= 100 ? '选择召唤盟友' : '通灵充能'}</strong><small>{snapshot.boss?.entering ? '落地后可召唤' : snapshot.energy >= 100 ? 'SPACE / 点击选择' : `${Math.floor(snapshot.energy)}%`}</small></span><span className="summon-key">␣</span></button>
             </>}
-            {inRun && snapshot.summons > 0 && ally.id === 'patch' && engine.state.summonFlash > 0 && <div className="summon-code" key={`code-${snapshot.seed}-${snapshot.summons}`} aria-hidden="true" data-paused={status !== 'playing'} style={{ '--ally-color': ally.color, '--summon-duration': `${SUMMON_DURATION}s` } as CSSProperties}>{Array.from({ length: 12 }, (_, i) => <span key={i} style={{ '--column': i } as CSSProperties}>01 10 01 11 00 10 01 00 11 10 00 01 10 11 01 00</span>)}</div>}
-            {inRun && snapshot.summons > 0 && engine.state.summonFlash > 0 && <div className={`summon-apparition apparition-${ally.id}`} key={`${snapshot.seed}-${snapshot.summons}`} data-paused={status !== 'playing'} style={{ '--ally-color': ally.color, '--summon-duration': `${SUMMON_DURATION}s` } as CSSProperties}><div className="summon-aura" aria-hidden="true"/><AllyPortrait ally={ally.id} className="summon-portrait"/><div className="summon-banner" role="status"><small>硅谷通灵术</small><strong>{ally.name}</strong><span>{ally.skill}</span><p>“{ally.quote}”</p></div></div>}
-            {inRun && engine.state.effects.freeze > 0 && <div className="time-stop-glyphs" aria-hidden="true"><span>ゴゴゴゴ</span><span>ゴゴゴゴ</span></div>}
+            {showCombatEffects && snapshot.summons > 0 && ally.id === 'patch' && engine.state.summonFlash > 0 && <div className="summon-code" key={`code-${snapshot.seed}-${snapshot.summons}`} aria-hidden="true" data-paused={status !== 'playing'} style={{ '--ally-color': ally.color, '--summon-duration': `${SUMMON_DURATION}s` } as CSSProperties}>{Array.from({ length: 8 }, (_, i) => <span key={i} style={{ '--column': i } as CSSProperties}>01 10 01 11 00 10 01 00 11 10 00 01 10 11 01 00</span>)}</div>}
+            {showCombatEffects && snapshot.summons > 0 && engine.state.summonFlash > 0 && <div className={`summon-apparition apparition-${ally.id}`} key={`${snapshot.seed}-${snapshot.summons}`} data-paused={status !== 'playing'} style={{ '--ally-color': ally.color, '--summon-duration': `${SUMMON_DURATION}s` } as CSSProperties}><div className="summon-aura" aria-hidden="true"/><AllyPortrait ally={ally.id} className="summon-portrait"/><div className="summon-banner" role="status"><small>硅谷通灵术</small><strong>{ally.name}</strong><span>{ally.skill}</span><p>“{ally.quote}”</p></div></div>}
+            {showCombatEffects && engine.state.effects.freeze > 0 && <div className="time-stop-glyphs" aria-hidden="true"><span>ゴゴゴゴ</span><span>ゴゴゴゴ</span></div>}
             <div className="arena-vignette"/>
           </div>
           <div className="equipment-dock"><div className="dock-caption"><span><Icon name="star" size={12}/> 数字 1 / 2 / 3 · 切培养焦点，不暂停</span><span>{snapshot.inventoryLocked ? '保护期间 · 武器匣锁定' : '三槽独立冷却'}</span></div><EquipmentSlots snapshot={snapshot} onPriority={prioritize}/><button type="button" className="inventory-button" disabled={status !== 'playing' || snapshot.inventoryLocked} onClick={openInventory}><Icon name="box" size={19}/><span>武器匣 <b>{reserves.length} 备用</b></span><kbd>B / TAB</kbd></button></div>
@@ -510,15 +585,15 @@ export default function App() {
         </section>
         <aside className="sidebar">
           <div className="mission-stack">
-          <section className="briefing-panel"><div className="panel-label">行动目标 <span>{snapshot.endless ? 'ENDLESS' : 'PHASE 03'}</span></div><div className="mission-icon"><Icon name="shield" size={26}/></div><h2>{EVENT_LABELS[snapshot.event]}</h2><p>{snapshot.endless ? '标准决战已经结束。继续守住算力神殿，无尽模式不设180秒时限。' : <>操控<strong>皮衣老J</strong>，穿过四场突发事件，在 <strong>180 秒</strong>内击败资本长老会主席。</>}</p><div className="mission-progress"><span>{status === 'victory' ? '神殿权限已收复' : status === 'defeat' ? '行动已结束' : snapshot.endless ? '无尽生存' : '决战进度'}</span><b className="mono">{snapshot.endless ? formatTime(snapshot.time) : `${Math.min(100, Math.floor(snapshot.time / RUN_DURATION * 100))}%`}</b></div>{!snapshot.endless && <Meter value={snapshot.time} max={RUN_DURATION} label="行动进度"/>}<div className="stage-note">00:35 做空 / 01:10 围堵 / 01:45 停电<br/>02:10 牛市 / 02:35 董事会主席降临</div>{challenge && <p className="challenge-mini">挑战中 · 起手锁定<br/>目标 {challenge.target.kills} 击杀 / LV.{challenge.target.level}<br/>本地未验证目标，非排名</p>}</section>
+          <section className="briefing-panel"><div className="panel-label">行动目标 <span>{snapshot.endless ? `${dungeon.floor}F / ENDLESS` : `${difficulty.name} · 三层高塔`}</span></div><div className="mission-icon"><Icon name="shield" size={26}/></div><h2>{dungeon.name}</h2><p>{snapshot.endless ? <>带着当前构筑继续攀塔。每层随机词缀，击破守关 Boss 后走入电梯，挑战下一层。</> : <>操控<strong>皮衣老J</strong>，清怪积攒突破进度，击败三位守关 Boss。{runTimeLimit > 210 ? <><strong>{formatTime(runTimeLimit)} 战斗上限</strong>，留好通灵迎战强敌。</> : <><strong>约 3 分钟</strong>杀回黄金圣殿。</>}</>}</p><div className="mission-progress"><span>{status === 'victory' ? '三层高塔已突破' : status === 'defeat' ? '本层突围结束' : `${dungeon.floor}F ${floorPhaseLabel(dungeon.phase)}`}</span><b className="mono">{Math.floor(dungeon.progress)}%</b></div><Meter value={dungeon.progress} max={100} label="当前楼层突破进度"/><ol className="dungeon-objectives"><li className={dungeon.floorsCleared >= 1 ? 'cleared' : ''}><span>1F</span><div><strong>外围霓虹广场</strong><small>直播装甲车 · 二选一分支门</small></div></li><li className={dungeon.floorsCleared >= 2 ? 'cleared' : ''}><span>2F</span><div><strong>{dungeon.branch ? branchName(dungeon.branch) : '极寒机房 / 暗网走廊'}</strong><small>绝对协议体 · 超武升级核心</small></div></li><li className={dungeon.floorsCleared >= 3 ? 'cleared' : ''}><span>3F</span><div><strong>顶层黄金圣殿</strong><small>牛市反转 · 算力收割机 MK-I</small></div></li></ol><div className="stage-note">清怪 → 守关 → 海克斯 → 走入电梯<br/>{snapshot.endless ? `已突破 ${dungeon.floorsCleared} 层 · 当前 ${dungeon.floor}F` : '杀得越快，守关 Boss 越早登场。'}</div>{challenge && <p className="challenge-mini">挑战中 · 起手锁定<br/>目标 {challenge.target.kills} 击杀 / LV.{challenge.target.level}{challenge.dungeonBranch && <><br/>同款路线：{branchName(challenge.dungeonBranch)}</>}<br/>本地未验证目标，非排名</p>}</section>
           <BattleTerminal logs={snapshot.logs} status={status} onFocus={clearInput}/>
           </div>
           <section className="loadout-panel ally-guide"><div className="panel-label">盟友图鉴 <span>每次均可更换</span></div><div className="ally-guide-options" role="group" aria-label="浏览盟友">{SUMMON_OPTIONS.map((option) => <button type="button" key={option.id} className={`ally-option ${previewAlly === option.id ? 'selected' : ''}`} aria-pressed={previewAlly === option.id} onClick={() => setPreviewAlly(option.id)} style={{ '--ally-color': option.color } as CSSProperties}><AllyPortrait ally={option.id}/><span><strong>{option.name}</strong><small>{option.skill}</small></span></button>)}</div><details className="ally-guide-detail"><summary>{preview.name} · {preview.skill}</summary><p>“{preview.quote}”</p><p>{preview.description}</p></details><p className="ally-note">满能量按 Space 暂停选择；选中后独立确认，取消保留能量。</p>{snapshot.summonHistory.length > 0 && <p className="ally-note">上次召唤：{ally.name} · {ally.skill}</p>}</section>
           <section className="hex-build-panel"><div className="panel-label">海克斯构筑 <span>{snapshot.hexRound} / {HEX_TIMES.length}</span></div>{snapshot.hexes.length === 0 ? <p className="hex-empty">{HEX_SCHEDULE}<br/>各选择一次，每次三槽各可刷新一次。</p> : <div className="hex-build-list">{snapshot.hexes.map((id) => { const card = HEXTECH.find((item) => item.id === id)!; return <div key={id} className={`hex-build-item tier-${card.tier}`} title={`${card.description} ${card.detail}`}><Icon name={card.icon} size={18}/><span><strong>{card.name}</strong><small>{card.detail}</small></span></div>; })}</div>}<details className="hex-catalog"><summary>十一张海克斯 · 完整图鉴</summary>{HEXTECH.map((card) => <div key={card.id} className={`tier-${card.tier}`}><h3>{card.name} <small>{TIER_LABELS[card.tier]}</small></h3><p>{card.description}</p><strong>{card.detail}</strong></div>)}</details></section>
-          <section className="controls-panel"><div className="panel-label">操作指引 <span>CONTROLS</span></div><div className="control-row"><div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div><span>移动 / 方向键 / 拖动</span></div><div className="control-row"><kbd>1 / 2 / 3</kbd><span>切培养焦点 · 不暂停</span></div><div className="control-row"><kbd>B / TAB</kbd><span>武器匣 · 暂停换装</span></div><div className="control-row"><kbd>SPACE</kbd><span>满能量选盟友 · 确认释放</span></div><div className="control-row"><kbd>SHIFT</kbd><span>斯安威斯坦（需选卡）</span></div><div className="control-row"><kbd>ESC</kbd><span>暂停 / 返回战场</span></div></section>
+          <section className="controls-panel"><div className="panel-label">操作指引 <span>CONTROLS</span></div><div className="control-row"><div><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div><span>移动 / 方向键 / 拖动</span></div><div className="control-row"><kbd>↗</kbd><span>破关后走入光圈选门</span></div><div className="control-row"><kbd>1 / 2 / 3</kbd><span>切培养焦点 · 不暂停</span></div><div className="control-row"><kbd>B / TAB</kbd><span>武器匣 · 暂停换装</span></div><div className="control-row"><kbd>SPACE</kbd><span>满能量选盟友 · 确认释放</span></div><div className="control-row"><kbd>SHIFT</kbd><span>斯安威斯坦（需选卡）</span></div><div className="control-row"><kbd>ESC</kbd><span>暂停 / 返回战场</span></div></section>
         </aside>
       </div>
-      <footer className="page-footer"><span><span className="status-dot"/> 本地运行 · 不上传对局数据</span><span>架空科技寓言 <i>/</i> BUILT WITH QODER <i>/</i> <b>v0.3</b></span></footer>
+      <footer className="page-footer"><span><span className="status-dot"/> 本地运行 · 不上传对局数据</span><span>架空科技寓言 <i>/</i> BUILT WITH QODER <i>/</i> <b>第二版 · 高塔地牢</b></span></footer>
     </main>
     <dialog ref={dialog} className={`game-dialog ${status === 'hex' ? 'hex-dialog' : status === 'summonSelect' ? 'summon-dialog' : status === 'inventory' ? 'inventory-dialog' : status === 'victory' ? 'newspaper-dialog' : status === 'defeat' ? 'defeat-dialog' : ''}`} onKeyDown={navigateSummons} onCancel={(event) => { event.preventDefault(); if (status === 'summonSelect') cancelSummon(); else if (status === 'inventory') closeInventory(); else if (status === 'paused') resume(); }} aria-labelledby="dialog-title" aria-describedby={status === 'summonSelect' ? 'summon-description' : undefined}>
       {status === 'inventory' && <>
@@ -548,13 +623,13 @@ export default function App() {
       </>}
       {status === 'paused' && <><span className="result-symbol"><Icon name="pause" size={34}/></span><div className="dialog-eyebrow">PAUSED</div><h2 id="dialog-title" tabIndex={-1}>游戏已暂停</h2><p className="dialog-description">战场与倒计时已冻结。<br/>切换窗口也会自动暂停。</p><button className="primary-button" onClick={resume}>继续突围 <Icon name="arrow"/></button><button className="text-button" onClick={() => start(true)}>同种子、同起手重试</button><button className="text-button" onClick={() => lobby()}>{pendingHash !== null ? '返回起手并载入当前链接' : '返回起手选择'}</button></>}
       {(status === 'victory' || status === 'defeat') && <>
-        {status === 'victory' ? <><div className="newspaper-masthead">硅谷科技周刊<span>THE SILICON VALLEY WEEKLY · 本地特别刊</span></div><div className="newspaper-dateline"><span>头版号外</span><span>SEED {seedLabel(snapshot.seed)}</span><span>神殿纪元 003</span></div><h2 id="dialog-title" className="victory-headline" tabIndex={-1}>皮衣归来，<br/>神殿易主。</h2><p className="newspaper-deck">资本长老会主席倒下，最高管理员权限重归老J。</p><div className="result-verdict">标准决战 · 胜利</div></> : <><div className="dialog-eyebrow">{snapshot.endless ? 'ENDLESS / 无尽败北' : 'DEFEAT / 行动失败'}</div><h2 id="dialog-title" tabIndex={-1} className="defeat-title">跌</h2><p className="dialog-description">{DEFEAT_QUOTE}</p>{snapshot.defeatReason === 'timeout' && <p className="defeat-reason">180 秒已到，资本长老会主席仍未被击败，本局判定战败。</p>}{snapshot.endless && <p className="defeat-reason">无尽股东大会到此结束。这是无尽败北，不是本次标准胜利结算。</p>}</>}
+        {status === 'victory' ? <><div className="newspaper-masthead">硅谷科技周刊<span>THE SILICON VALLEY WEEKLY · 高塔特别刊</span></div><div className="newspaper-dateline"><span>头版号外</span><span>SEED {seedLabel(snapshot.seed)}</span><span>神殿纪元 004</span></div><h2 id="dialog-title" className="victory-headline" tabIndex={-1}>皮衣归来，<br/>神殿易主。</h2><p className="newspaper-deck">三层高塔全线突破，资本长老会主席倒下。最高管理员权限重归老J。</p><blockquote className="chairman-epitaph">“看来……没能让老J使出全力啊。”</blockquote><div className="result-verdict">{difficulty.name} · 三层高塔 · 胜利</div></> : <><div className="dialog-eyebrow">{snapshot.endless ? `ENDLESS / ${dungeon.floor}F 无尽败北` : `DEFEAT / ${dungeon.floor}F 突围失败`} · {difficulty.name}</div><h2 id="dialog-title" tabIndex={-1} className="defeat-title">跌</h2><p className="dialog-description">{DEFEAT_QUOTE}</p>{snapshot.defeatReason === 'timeout' && <p className="defeat-reason">{difficulty.name}难度的战斗时间已达 {formatTime(runTimeLimit)}，高塔尚未突破。再选一套构筑杀回来。</p>}{snapshot.endless && <p className="defeat-reason">无尽深渊挑战止于 {dungeon.floor}F，累计突破 {dungeon.floorsCleared} 层。</p>}</>}
         <div className="result-stats"><div><strong>{formatTime(report?.time ?? snapshot.time)}</strong><span>{snapshot.endless ? '累计生存时间' : '战斗时间'}</span></div><div><strong>{report?.kills ?? snapshot.kills}</strong><span>击杀敌人</span></div><div><strong>{report?.level ?? snapshot.level}</strong><span>本局等级</span></div></div>
         {report && <BuildSummary report={report}/>}
-        <div className="result-actions"><button type="button" className="secondary-button" disabled={!report || posterBusy} onClick={() => void downloadPoster()}><Icon name="download" size={17}/>{posterBusy ? '本地绘制中…' : '下载战报 PNG'}</button><button type="button" className="secondary-button" disabled={!report} onClick={() => void copyChallenge()}><Icon name="link" size={17}/>复制挑战链接</button>{status === 'victory' && <button type="button" className="primary-button endless-button" onClick={enterEndless}>进入无尽股东大会模式 <Icon name="arrow" size={18}/></button>}<button type="button" className="secondary-button" onClick={() => start(true)}><Icon name="replay" size={17}/>同种子、同起手重试</button><button type="button" className="secondary-button" onClick={() => lobby()}>{pendingHash !== null ? '回起手，载入当前链接' : '返回起手选择'}</button></div>
-        <p className="report-message" role="status">{reportMessage || (!report ? '引擎尚未提供最终战报，暂不能导出或分享。' : '全本地生成；挑战目标未经验证，非服务器排名。')}</p>{manualLink && <label className="manual-copy">手动复制挑战链接<input ref={copyInput} readOnly value={manualLink} onFocus={(event) => event.currentTarget.select()} aria-label="只读挑战链接，按 Ctrl+C 或长按复制"/><span>Ctrl+C / 长按复制；复制完成后可继续选择结算操作。</span></label>}<p className="result-seed mono">SEED {seedLabel(snapshot.seed)} · 起手 {WEAPONS[snapshot.initialWeapon].name}<br/>同 seed、同决策复现候选与掉落；不包含自动回放。</p>
+        <div className="result-actions"><button type="button" className="secondary-button" disabled={!report || posterBusy} onClick={() => void downloadPoster()}><Icon name="download" size={17}/>{posterBusy ? '本地绘制中…' : '下载战报 PNG'}</button><button type="button" className="secondary-button" disabled={!report} onClick={() => void copyChallenge()}><Icon name="link" size={17}/>复制地牢挑战链接</button>{status === 'victory' && <button type="button" className="primary-button endless-button" onClick={enterEndless}>深入无尽地牢 · 4F AI 奇点核心 <Icon name="arrow" size={18}/></button>}<button type="button" className="secondary-button" onClick={() => start(true)}><Icon name="replay" size={17}/>同种子、同起手重试</button><button type="button" className="secondary-button" onClick={() => lobby()}>{pendingHash !== null ? '回起手，载入当前链接' : '返回起手选择'}</button></div>
+        <p className="report-message" role="status">{reportMessage || (!report ? '引擎尚未提供最终战报，暂不能导出或分享。' : '全本地生成；挑战目标未经验证，非服务器排名。')}</p>{manualLink && <label className="manual-copy">手动复制挑战链接<input ref={copyInput} readOnly value={manualLink} onFocus={(event) => event.currentTarget.select()} aria-label="只读挑战链接，按 Ctrl+C 或长按复制"/><span>Ctrl+C / 长按复制；复制完成后可继续选择结算操作。</span></label>}<p className="result-seed mono">SEED {seedLabel(snapshot.seed)} · 起手 {WEAPONS[snapshot.initialWeapon].name} · {difficulty.name}<br/>同种子、同难度、同路线、同决策复现地图、候选与掉落；不包含自动回放。</p>
       </>}
     </dialog>
-    {showIntro && !inRun && <IntroCutscene onComplete={finishIntro} onUnlock={unlockIntro} onRise={playIntroRise}/>}
+    {showIntro && !inRun && <IntroCutscene initialWeapon={snapshot.initialWeapon} onComplete={finishIntro} onUnlock={unlockIntro} onRise={playIntroRise}/>}
   </div>;
 }

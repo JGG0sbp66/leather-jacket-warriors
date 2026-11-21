@@ -1,14 +1,16 @@
 import { WEAPONS } from '../data/weapons.ts';
 import { HEXTECH } from '../data/hextech.ts';
 import { ALLIES } from '../data/summons.ts';
+import { DIFFICULTIES } from '../data/difficulty.ts';
 import type { RunReport } from '../types/game.ts';
 
 const WIDTH = 1080;
-const HEIGHT = 1440;
+const HEIGHT = 1640;
 const INK = '#252e24';
 const MUTED = '#686957';
 const SERIF = '"Songti SC", "SimSun", "Noto Serif CJK SC", serif';
 const SANS = '"Microsoft YaHei", "PingFang SC", sans-serif';
+const formatTime = (seconds: number) => `${Math.floor(seconds / 60).toString().padStart(2, '0')}:${Math.floor(seconds % 60).toString().padStart(2, '0')}`;
 
 function wrapText(ctx: CanvasRenderingContext2D, text: string, width: number): string[] {
   return text.split('\n').flatMap((paragraph) => {
@@ -68,6 +70,7 @@ function section(ctx: CanvasRenderingContext2D, title: string, y: number, number
 }
 
 export async function generatePoster(report: RunReport): Promise<Blob> {
+  const difficulty = DIFFICULTIES[report.difficulty ?? 'standard'];
   const canvas = document.createElement('canvas');
   canvas.width = WIDTH;
   canvas.height = HEIGHT;
@@ -96,22 +99,23 @@ export async function generatePoster(report: RunReport): Promise<Blob> {
   ctx.strokeRect(41, 41, WIDTH - 82, HEIGHT - 82);
 
   textBox(ctx, '硅谷科技周刊', { x: 64, y: 65, width: 952, height: 108, size: 77, family: SERIF, bold: true, center: true });
-  textBox(ctx, 'THE SILICON VALLEY WEEKLY  /  头版号外', { x: 64, y: 174, width: 952, height: 31, size: 19, center: true });
+  textBox(ctx, `THE SILICON VALLEY WEEKLY  /  ${difficulty.name}难度 · 高塔地牢号外`, { x: 64, y: 174, width: 952, height: 31, size: 19, center: true });
   rule(ctx, 216, true);
   textBox(ctx, report.victory ? '皮衣归来，神殿易主。' : '跌', { x: 64, y: 246, width: 952, height: 101, size: report.victory ? 61 : 76, bold: true, family: report.victory ? SERIF : '"KaiTi", "STKaiti", serif', center: true, color: report.victory ? '#28412a' : '#873f31' });
   const deck = report.victory
-    ? '胜利 / 资本长老会主席倒下，最高管理员权限重归老J。'
-    : '战败 / 犹豫，就会被做空。老J决定连夜转行去夜市摆摊卖黄金蛋炒饭。';
+    ? '三层突破 / 算力收割机 MK-I 倒下，最高管理员权限重归老J。'
+    : report.endless ? `无尽败北 / 深渊挑战止于 ${report.highestFloor ?? 4}F，已突破 ${report.floorsCleared ?? 3} 层。犹豫，就会被做空。`
+      : `地牢败北 / 突围止于 ${report.highestFloor ?? 1}F。犹豫，就会被做空，老J连夜去夜市摆摊卖黄金蛋炒饭。`;
   textBox(ctx, deck, { x: 96, y: 361, width: 888, height: 74, size: 26, family: SERIF, center: true });
 
   ctx.fillStyle = '#35492d';
   ctx.fillRect(64, 454, 952, 102);
-  const time = `${Math.floor(report.time / 60).toString().padStart(2, '0')}:${Math.floor(report.time % 60).toString().padStart(2, '0')}`;
-  const metrics = [[time, '战斗时间'], [String(report.kills), '击杀敌人'], [`LV.${report.level}`, '本局等级']];
+  const time = formatTime(report.time);
+  const metrics = [[time, '战斗时间'], [String(report.kills), '击杀敌人'], [`LV.${report.level}`, '本局等级'], [`${report.highestFloor ?? (report.victory ? 3 : 1)}F`, '到达楼层']];
   metrics.forEach(([value, label], index) => {
-    const x = 64 + index * 952 / 3;
-    textBox(ctx, value, { x, y: 466, width: 952 / 3, height: 50, size: 34, color: '#f1e9d6', bold: true, center: true });
-    textBox(ctx, label, { x, y: 517, width: 952 / 3, height: 28, size: 18, color: '#c8d0b9', center: true });
+    const x = 64 + index * 238;
+    textBox(ctx, value, { x, y: 466, width: 238, height: 50, size: 34, color: '#f1e9d6', bold: true, center: true });
+    textBox(ctx, label, { x, y: 517, width: 238, height: 28, size: 18, color: '#c8d0b9', center: true });
   });
 
   section(ctx, '前线装备 / 三槽构筑', 582, '01');
@@ -142,10 +146,16 @@ export async function generatePoster(report: RunReport): Promise<Blob> {
     return count ? [`${ally.name} ×${count}`] : [];
   }).join('  /  ');
   textBox(ctx, summons || '本局尚未召唤盟友', { x: 64, y: 1142, width: 952, height: 82, size: 25 });
-  rule(ctx, 1238, true);
+  rule(ctx, 1238);
 
-  textBox(ctx, `SEED ${report.seed.toString(16).toUpperCase().padStart(8, '0')}  /  起手：${WEAPONS[report.initialWeapon].name}`, { x: 64, y: 1263, width: 952, height: 63, size: 23, bold: true });
-  textBox(ctx, '本地战报，未经服务器验证，不代表排名。\n同种子、同决策复现候选与掉落；挑战不是自动回放。', { x: 64, y: 1333, width: 952, height: 55, size: 16, color: MUTED, center: true });
+  section(ctx, '地牢突破 / 攀塔路线', 1260, '05');
+  const branch = report.dungeonBranch === 'cryo' ? '极寒超频机房' : report.dungeonBranch === 'darknet' ? '断电暗网走廊' : '未选择二层分支';
+  const highestFloor = report.highestFloor ?? (report.victory ? 3 : 1);
+  const route = `1F 外围霓虹广场${highestFloor >= 2 ? ` → 2F ${branch}` : ` / ${branch}`}${highestFloor >= 3 ? ' → 3F 黄金圣殿' : ''}${report.endless ? ` → ${highestFloor}F 无尽深渊` : ''}`;
+  textBox(ctx, `${route}\n${difficulty.name}难度 / 已突破 ${report.floorsCleared ?? (report.victory ? 3 : 0)} 层 / ${report.endless ? '无尽地牢挑战' : `三层突围 · 战斗上限 ${formatTime(difficulty.timeLimit)}`}`, { x: 64, y: 1305, width: 952, height: 99, size: 25 });
+  rule(ctx, 1420, true);
+  textBox(ctx, `SEED ${report.seed.toString(16).toUpperCase().padStart(8, '0')}  /  起手：${WEAPONS[report.initialWeapon].name}`, { x: 64, y: 1445, width: 952, height: 63, size: 23, bold: true });
+  textBox(ctx, '本地战报，未经服务器验证，不代表排名。\n同种子、同难度、同路线、同决策复现地图、候选与掉落；不包含自动回放。', { x: 64, y: 1530, width: 952, height: 55, size: 16, color: MUTED, center: true });
 
   return new Promise<Blob>((resolve, reject) => {
     try {

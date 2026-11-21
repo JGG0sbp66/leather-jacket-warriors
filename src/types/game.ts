@@ -1,12 +1,15 @@
 export const WORLD_WIDTH = 1200;
 export const WORLD_HEIGHT = 800;
 export const RUN_DURATION = 180;
+export const MAX_RUN_DURATION = 210;
 export const FIXED_STEP = 1 / 60;
 export const SUMMON_DURATION = 2.4;
+export const BOSS_INTRO_DURATION = 2.8;
 export const MAX_PROJECTILES = 180;
 export const HEX_TIMES = [45, 95, 135] as const;
 export const MAX_BATTLE_LOG_ENTRIES = 120;
 export type GameStatus = 'ready' | 'playing' | 'paused' | 'inventory' | 'hex' | 'summonSelect' | 'finishing' | 'victory' | 'defeat';
+export type DifficultyId = 'casual' | 'standard' | 'hard' | 'nightmare';
 export type WeaponId = 'gpu' | 'spatula' | 'cuda' | 'pulse' | 'duck';
 export type UpgradeId = WeaponId | 'power' | 'rapid' | 'volley' | 'magnet' | 'vitality' | 'speed';
 export type SoundName = 'shoot' | 'hit' | 'pickup' | 'hurt' | 'upgrade' | 'summon' | 'victory' | 'defeat' | 'parry' | 'dash' | 'intro' | 'alarm' | 'blackflash';
@@ -56,6 +59,80 @@ export interface WeaponEffect extends Point {
   evolved: boolean;
 }
 export interface Point { x: number; y: number }
+export type DungeonMap = 'plaza' | 'cryo' | 'darknet' | 'temple' | 'singularity';
+export type DungeonBranch = 'cryo' | 'darknet';
+export type DungeonPhase = 'clearing' | 'boss' | 'portal' | 'transition';
+export type BossType = 'truck' | 'legal' | 'chairman';
+export interface DungeonObstacle extends Point { id: number; width: number; height: number }
+export interface DungeonBarrel extends Point {
+  id: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+  flash: number;
+  explosion: number;
+  explosionRadius: number;
+}
+export interface CoolantPool extends Point { id: number; radius: number }
+export interface DungeonLaser extends Point {
+  id: number;
+  angle: number;
+  length: number;
+  width: number;
+  warning: number;
+  active: number;
+  cooldown: number;
+  source: 'security' | 'boss';
+}
+export interface DungeonPortal extends Point {
+  id: number;
+  radius: number;
+  destination: DungeonMap;
+  nextFloor: number;
+  label: string;
+  description: string;
+  color: string;
+}
+export interface DungeonState {
+  floor: number;
+  map: DungeonMap;
+  name: string;
+  branch: DungeonBranch | null;
+  phase: DungeonPhase;
+  floorTime: number;
+  progress: number;
+  killProgress: number;
+  kills: number;
+  floorsCleared: number;
+  pendingHex: boolean;
+  transition: number;
+  obstacles: DungeonObstacle[];
+  barrels: DungeonBarrel[];
+  pools: CoolantPool[];
+  lasers: DungeonLaser[];
+  portals: DungeonPortal[];
+  coolantUntil: number;
+  playerInCoolant: boolean;
+  affixes: string[];
+  enemyHpMultiplier: number;
+  enemySpeedMultiplier: number;
+  hazardDamageMultiplier: number;
+}
+export interface DungeonSnapshot {
+  floor: number;
+  map: DungeonMap;
+  name: string;
+  branch: DungeonBranch | null;
+  phase: DungeonPhase;
+  progress: number;
+  floorTime: number;
+  kills: number;
+  floorsCleared: number;
+  affixes: string[];
+  transition: number;
+  portalChoices: Pick<DungeonPortal, 'destination' | 'label' | 'description' | 'color'>[];
+  playerInCoolant: boolean;
+}
 export interface Player extends Point {
   radius: number;
   hp: number;
@@ -65,7 +142,8 @@ export interface Player extends Point {
   invincible: number;
   moving: boolean;
 }
-export type EnemyKind = 'reporter' | 'short' | 'legal' | 'security' | 'assassin' | 'bull' | 'boss' | 'guard';
+export type EnemyKind = 'reporter' | 'short' | 'legal' | 'security' | 'assassin' | 'bull' | 'boss' | 'guard'
+  | 'keyboard' | 'captain' | 'fan' | 'drone' | 'ghost' | 'vulture' | 'quant' | 'ironGuard';
 export interface Enemy extends Point {
   id: number;
   radius: number;
@@ -81,8 +159,9 @@ export interface Enemy extends Point {
   chargeState: 'approach' | 'aim' | 'dash';
   chargeTime: number;
   chargeAngle: number;
+  bossType?: BossType;
   ringMember?: boolean;
-  supplyKey?: 'weapon-25' | 'weapon-55';
+  supplyKey?: 'weapon-25' | 'weapon-55' | 'captain-supply' | 'ghost-supply' | 'iron-supply';
 }
 export interface Projectile extends Point {
   id: number;
@@ -106,8 +185,11 @@ export interface EnemyProjectile extends Point {
   radius: number;
   damage: number;
   life: number;
-  shape: 'arrow' | 'document';
+  shape: 'arrow' | 'document' | 'at' | 'missile' | 'data' | 'flash';
   rotation: number;
+  homing?: boolean;
+  ignoresObstacles?: boolean;
+  boomerang?: { origin: Point; returnAfter: number; returning: boolean };
 }
 export interface Airstrike extends Point {
   radius: number;
@@ -152,6 +234,8 @@ export interface WeaponDrop extends Point {
   weapon: WeaponId | null;
   core: boolean;
   source: string;
+  overclock?: boolean;
+  rare?: boolean;
 }
 export interface BattleLogEntry {
   id: number;
@@ -162,7 +246,7 @@ export interface BattleLogEntry {
 export interface CrashPillar extends Point { id: number; radius: number; delay: number; life: number; hit: boolean }
 export interface BossCut extends Point { id: number; angle: number; length: number; width: number; delay: number; life: number; hit: boolean }
 export interface StoryState {
-  event: 'parking' | 'shortCrash' | 'paparazzi' | 'blackout' | 'bull' | 'alarm' | 'boss' | 'endless';
+  event: 'parking' | 'shortCrash' | 'paparazzi' | 'blackout' | 'cryo' | 'bull' | 'alarm' | 'boss' | 'truck' | 'legalBoss' | 'portal' | 'endless';
   news: string;
   fired: string[];
   crashes: CrashPillar[];
@@ -172,6 +256,16 @@ export interface StoryState {
   bullUntil: number;
   nextBullSpawn: number;
   bossId: number | null;
+  bossDeath: Point | null;
+  bossType: BossType | null;
+  bossIntroStart: number;
+  bossLanding: Point | null;
+  bossPhaseGuardUntil: number;
+  bossPhaseGuardRemaining: number;
+  bossName: string;
+  bossTitle: string;
+  bossIntroText: string;
+  bossQuoteText: string;
   bossPhase: 1 | 2;
   bossIntroUntil: number;
   bossQuoteRemaining: number;
@@ -191,15 +285,23 @@ export interface RunReport {
   hexes: HexId[];
   summonHistory: AllyId[];
   victory: boolean;
+  difficulty?: DifficultyId;
+  dungeonBranch?: DungeonBranch | null;
+  floorsCleared?: number;
+  highestFloor?: number;
+  endless?: boolean;
 }
 export interface RunChallenge {
-  version: 2;
+  version: 2 | 3 | 4;
   seed: number;
   initialWeapon: WeaponId;
-  target: { kills: number; level: number; time: number; weapons: RunReport['weapons']; equipped: (WeaponId | null)[]; hexes: HexId[]; summonHistory: AllyId[] };
+  difficulty?: DifficultyId;
+  dungeonBranch?: DungeonBranch | null;
+  target: { kills: number; level: number; time: number; weapons: RunReport['weapons']; equipped: (WeaponId | null)[]; hexes: HexId[]; summonHistory: AllyId[]; floorsCleared?: number; highestFloor?: number; endless?: boolean };
 }
 export interface GameState {
   status: GameStatus;
+  difficulty: DifficultyId;
   seed: number;
   time: number;
   level: number;
@@ -241,6 +343,7 @@ export interface GameState {
   enemyProjectiles: EnemyProjectile[];
   strikes: Airstrike[];
   story: StoryState;
+  dungeon: DungeonState;
   endless: boolean;
   bossDefeated: boolean;
   blackFlash: number;
@@ -249,6 +352,8 @@ export interface GameState {
 }
 export interface GameSnapshot {
   status: GameStatus;
+  difficulty: DifficultyId;
+  timeLimit: number;
   seed: number;
   time: number;
   level: number;
@@ -277,7 +382,8 @@ export interface GameSnapshot {
   news: string;
   event: StoryState['event'];
   eventRemaining: number;
-  boss: { hp: number; maxHp: number; phase: 1 | 2; entering: boolean; quote: boolean } | null;
+  dungeon: DungeonSnapshot;
+  boss: { hp: number; maxHp: number; phase: 1 | 2; entering: boolean; quote: boolean; guarded: boolean; type: BossType; name: string; title: string; introText: string; quoteText: string } | null;
   danger: boolean;
   endless: boolean;
   bossDefeated: boolean;

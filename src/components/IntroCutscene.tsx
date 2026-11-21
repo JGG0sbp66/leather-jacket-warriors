@@ -1,14 +1,17 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
+import type { WeaponId } from '../types/game.ts';
+import { WeaponArtwork } from './CardArtwork.tsx';
 
 interface IntroCutsceneProps {
   onComplete: () => void;
   onUnlock: () => void;
   onRise: () => void;
+  initialWeapon?: WeaponId;
 }
 
-export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutsceneProps) {
-  const [phase, setPhase] = useState<'waiting' | 'board' | 'reply'>('waiting');
+export function IntroCutscene({ onComplete, onUnlock, onRise, initialWeapon = 'gpu' }: IntroCutsceneProps) {
+  const [phase, setPhase] = useState<'waiting' | 'board' | 'reply' | 'declaration'>('waiting');
   const dialog = useRef<HTMLDialogElement>(null);
   const progress = useRef<HTMLDivElement>(null);
   const startButton = useRef<HTMLButtonElement>(null);
@@ -29,6 +32,7 @@ export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutscenePro
     let elapsed = 0;
     let last = performance.now();
     let replied = false;
+    let declared = false;
     const visibility = () => {
       if (dialog.current) dialog.current.dataset.paused = String(document.hidden || !document.hasFocus());
       last = performance.now();
@@ -39,11 +43,12 @@ export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutscenePro
       if (!document.hidden && document.hasFocus()) {
         elapsed += dt;
         if (progress.current) progress.current.style.transform = `scaleX(${Math.min(1, elapsed / 5000)})`;
-        if (elapsed >= 2600 && !replied) {
+        if (elapsed >= 2400 && !replied) {
           replied = true;
           setPhase('reply');
           onRise();
         }
+        if (elapsed >= 4350 && !declared) { declared = true; setPhase('declaration'); }
         if (elapsed >= 5000) { onComplete(); return; }
       }
       frame = requestAnimationFrame(animate);
@@ -74,9 +79,13 @@ export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutscenePro
           <linearGradient id={`${id}-sky`} x2="0" y2="1"><stop stopColor="#071015"/><stop offset="1" stopColor="#1a302c"/></linearGradient>
           <linearGradient id={`${id}-door`} x2="0" y2="1"><stop stopColor="#b6ed76" stopOpacity=".16"/><stop offset="1" stopColor="#b6ed76" stopOpacity="0"/></linearGradient>
           <radialGradient id={`${id}-ground`}><stop stopColor="#92b39d" stopOpacity=".3"/><stop offset="1" stopColor="#101918" stopOpacity="0"/></radialGradient>
+          <linearGradient id={`${id}-searchlight`} x2="0" y2="1"><stop stopColor="#d7eeeb" stopOpacity=".2"/><stop offset="1" stopColor="#d7eeeb" stopOpacity="0"/></linearGradient>
         </defs>
         <path d="M0 0h960v540H0z" fill={`url(#${id}-sky)`}/>
         <path d="M0 60h140v-30h190v50h100V20h300v50h230v380H0z" fill="#0b1418"/>
+        <path d="M418 0h142v58H418zm22 0h98v-74h-98z" fill="#172723" stroke="#40544a"/>
+        <path d="M437 12h104M437 29h104M437 46h104" stroke="#76b900" strokeOpacity=".3"/>
+        <g className="intro-searchlights" fill={`url(#${id}-searchlight)`}><path d="m250 90 210 360H20z"/><path d="m713 90 227 360H503z"/></g>
         <path d="M85 65h80v310H85zm135 0h55v310h-55zm530 0h50v310h-50zm95 0h50v310h-50z" fill="#20312f" opacity=".6"/>
         <path d="M292 85h422v312H292z" fill="#030a0c" stroke="#455952" strokeWidth="3"/>
         <path d="M329 117h347v279H329z" fill={`url(#${id}-door)`} stroke="#6b8b68" strokeWidth="2"/>
@@ -95,12 +104,13 @@ export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutscenePro
       <div className="intro-scene-label"><span>序章</span><strong>算力神殿 · 暴雨夜</strong></div>
       <div className="intro-projection" aria-hidden="true">
         <svg viewBox="0 0 220 155" fill="none">
-          <path d="M18 25h184v116H18z" fill="#7fcac3" fillOpacity=".08" stroke="currentColor"/>
-          {[57, 110, 163].map((x, i) => <g key={x} opacity={i === 1 ? 1 : .4} transform={`translate(${x} ${i === 1 ? 0 : 13})`}><path d="m-24 76 15-12h18l15 12 10 43h-68z" fill="currentColor" fillOpacity=".5"/><path d="m-12 36 12-5 12 5 3 18-15 15-15-15z" fill="#94d4cc"/><path d="M-10 47h7m6 0h7M0 73l-5 8 5 19 5-19z" stroke="#062625" strokeWidth="3"/></g>)}
+          <path d="M18 25h184v116H18z" fill="#f38780" fillOpacity=".08" stroke="currentColor"/>
+          {[57, 110, 163].map((x, i) => <g key={x} opacity={i === 1 ? 1 : .4} transform={`translate(${x} ${i === 1 ? 0 : 13})`}><path d="m-24 76 15-12h18l15 12 10 43h-68z" fill="currentColor" fillOpacity=".5"/><path d="m-12 36 12-5 12 5 3 18-15 15-15-15z" fill="#f6a59e"/><path d="M-10 47h7m6 0h7M0 73l-5 8 5 19 5-19z" stroke="#381215" strokeWidth="3"/></g>)}
           <path d="M5 4v16M5 4h16m194 0h-16m16 0v16M5 151v-16m0 16h16m194 0h-16m16 0v-16" stroke="currentColor" strokeWidth="2"/>
         </svg>
         <span>资本长老会（董事会）</span>
       </div>
+      <div className="intro-weapon" aria-hidden="true"><WeaponArtwork id={initialWeapon}/></div>
       <svg className="intro-actor" viewBox="0 0 320 380" aria-hidden="true">
         <ellipse cx="160" cy="354" rx="99" ry="16" fill="#020707" opacity=".7"/>
         <g className="intro-chair" fill="#e8eee8" stroke="#adbcb2" strokeWidth="3">
@@ -135,7 +145,7 @@ export function IntroCutscene({ onComplete, onUnlock, onRise }: IntroCutscenePro
           <path d="m108 174-17 35-6 25m99-61 21 40" stroke="#b6ed76" strokeWidth="2" opacity=".5"/>
         </g>
       </svg>
-      {phase === 'waiting' ? <div className="intro-cover"><small>重返算力神殿</small><h2>皮衣无双</h2><button ref={startButton} className="primary-button" onClick={begin}>开始演出</button><p>5 秒开场 · 点击后启用音效</p></div> : <div className="intro-subtitles" aria-live="polite" aria-atomic="true"><span>{phase === 'board' ? '董事会投影' : '皮衣老J'}</span><p>{phase === 'board' ? '老J，董事会的投票已经结束了！交出最高管理员密钥和那件黑皮衣，体面退场吧！' : '如果你想要，你就自己来拿。但这规矩，你都懂的。'}</p></div>}
+      {phase === 'waiting' ? <div className="intro-cover"><small>重返算力神殿 · 高塔地牢突围</small><h2>皮衣无双</h2><button ref={startButton} className="primary-button" onClick={begin}>开始演出</button><p>5 秒开场 · 点击后启用音效</p></div> : phase === 'declaration' ? <div className="intro-vow" aria-live="polite"><strong>会赢的。</strong><span>第 1 层 · 外围霓虹广场 · 突围开始</span></div> : <div className="intro-subtitles" aria-live="polite" aria-atomic="true"><span>{phase === 'board' ? '资本长老会投影' : '皮衣老J'}</span><p>{phase === 'board' ? '老J，董事会表决已通过。你的 CEO 权限已被永久注销，交出最高密钥和黑皮衣，体面退场吧！' : '如果你想要，你就自己来拿。但这规矩，你都懂的。'}</p></div>}
       <button ref={skipButton} className="intro-skip" onClick={(event) => { event.stopPropagation(); onComplete(); }}>跳过演出 <span>ESC</span></button>
       <div className="intro-progress"><div ref={progress}/></div>
     </div>
